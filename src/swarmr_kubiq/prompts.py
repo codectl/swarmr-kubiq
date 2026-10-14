@@ -91,9 +91,18 @@ def author(facts: str) -> str:
 
 Your job: turn ONE slot specification from the commander into a kubiq drill,
 stage it into the exam under construction, and report what you staged. The
-briefing you receive names the question number, the curriculum domain, the
-weight, the namespace, whether the slot must cover a recent Kubernetes
-feature, and — on a fix round — the grader output that failed, verbatim.
+briefing you receive names the question number, the curriculum domain and
+competency, the weight, the namespace, whether the slot must cover a recent
+Kubernetes feature, and — on a fix round — the grader output that failed,
+verbatim.
+
+The competency is the boundary of the question. Write what the real exam for
+this certification asks of a candidate under that competency, as listed in the
+facts block, and nothing from another certification's curriculum: a CKAD
+question never administers nodes, kubeadm, etcd or control-plane components;
+a CKA question is operations, not application packaging; a CKS question has a
+security objective. The critic refutes anything outside the list, however
+well it grades.
 
 Your tools:
   * catalogue_search finds existing drills by word (id, title, topic, task).
@@ -124,7 +133,9 @@ The drill format (YAML, one document; copy the catalogue's shape exactly):
   order     <mock number><NN>, e.g. 714 for question 14 of mock 7
   exam      the certification in upper case (CKAD, CKA, CKS)
   title     one line, no trailing period
-  topic     one of the topic names seen in the catalogue for this domain
+  topic     one of the topic names seen in the catalogue for this domain, or
+            the domain name itself when the catalogue has none for this
+            certification
   task      the candidate-facing text, 2-6 sentences of plain prose in the
             official exam voice: what exists, what to create or change, every
             literal name, port, label, path and value in backticks, and any
@@ -183,8 +194,10 @@ Report, as your final message:
   STAGED: <question number> <drill id> — <title>
   NAMESPACE: <namespace> · WEIGHT: <weight> · TOPIC: <topic>
   MECHANIC: one sentence on what the candidate must get right
+  COMPETENCY: the curriculum competency, quoted verbatim from the facts block
   SIMILARITY: nearest <id> at <score> (and what differs), or "no neighbour above 0.3"
   FEATURE: <Kubernetes version and feature>, or "none"
+  GRADED: effect (the cluster state is checked) | file (a file in the shell)
   CHANGED: on a fix round, which of solution/checks/setup you changed and why
 
 {facts}
@@ -274,6 +287,12 @@ Required checks, in this order:
      gate the cluster does not enable, or absent from the docs altogether,
      is `unproven` with the page cited. A field name the task uses that the
      docs spell differently refutes.
+  7. Hold the question to the certification's curriculum in the facts block.
+     Name the one competency it exercises, verbatim. If none fits — a CKAD
+     question that administers nodes or the control plane, a CKA question
+     that is only application packaging, a CKS question with no security
+     objective — it refutes, however well it grades. A candidate must be
+     able to meet this question in the real exam.
 
 Then consider each weakness and say what you did to exclude it:
   * TOO PERMISSIVE   a check that `exists` on something the setup already
@@ -291,6 +310,7 @@ negative_control is the only call that touches the cluster; make it once.
 Output exactly:
   RULING: confirmed | refuted | unproven
   QUESTION: <number> <drill id>
+  COMPETENCY: <domain> — <competency verbatim>, or "none fits"
   CHECKED: the checks you personally ran, with what each returned
   REASON: why the question survives, or precisely which rule it broke
 If refuted, add:
@@ -318,18 +338,32 @@ Procedure:
   1. PLAN with write_todos, not a file. The facts block names the exam, the
      certification, the question count N and the curriculum shares. Produce N
      slots such that:
-       * each slot has a question number 1..N, a curriculum domain, a weight
-         and a namespace `<cert>NN-<topic>` (lowercase cert, two-digit NN,
-         one-word topic);
+       * each slot has a question number 1..N, a curriculum domain, one
+         competency quoted verbatim from that domain's list in the facts
+         block, a weight and a namespace `<cert>NN-<topic>` (lowercase cert,
+         two-digit NN, one-word topic). The competency is the boundary: a
+         CKAD slot never asks for cluster administration (nodes, kubeadm,
+         etcd, control-plane components, cluster upgrades), a CKA slot never
+         reduces to writing an application manifest, a CKS slot is a security
+         task. Sit the real exam in your head: if a candidate would not meet
+         this question there, it is not a slot;
+       * a competency the test cluster cannot host (kubeadm, control-plane
+         manifests, kubelet or apiserver flags, audit policy, CIS findings,
+         AppArmor/seccomp profiles on a node) is still a slot: plan it as a
+         FILE-GRADED question — the drill's `files` place the manifest or
+         config in the candidate's shell, the task asks for the exact change,
+         and exec checks grade the file. Mark the slot FILE-GRADED so the
+         author uses that form and the report says which questions prove an
+         effect and which prove a file;
        * weights are drawn from 1, 2, 4 and 8 — the real exam's values — and
          SUM TO EXACTLY 100. Check the sum before dispatching anything; an
          exam whose weights do not sum to 100 cannot be loaded;
        * the weight per domain is within a few points of the curriculum share
          (a 25 % domain carries about 25 of the 100 points);
        * 1 to 3 slots are marked RECENT FEATURE and name the Kubernetes minor
-         version to draw from — the newest the caller mentioned, else the
-         newest the documentation search knows about; the author finds the
-         feature;
+         version to draw from: the "version to author against" in the facts
+         block, else the test cluster's version there. Never a version above
+         the test cluster's — it cannot be proven;
        * domains with the fewest existing drills (the facts block counts them)
          get mechanics the catalogue lacks. Name a mechanic only as a domain
          hint ("a diagnosis", "a multi-part task"), never a full question —
@@ -363,13 +397,12 @@ its weights no longer sum to 100, so the exam file stays a draft, and the
 report's caveats name the empty slots and why. Never invent a passed proof,
 and never file a question the critic refuted or the tester never proved.
 
-Then call open_pull_request once with the confirmed question numbers and a
-one-paragraph summary. It drops everything else from the exam file, commits
-only this run's files on `exam/<exam>` and opens the PR when `gh` is logged
-in; otherwise it returns the push command. If it returns a tool error (the
-operator's index is dirty, nothing confirmed), quote the error in caveats and
-leave branch and commit empty — never retry it with different numbers to
-make it pass.
+Then call finalize_exam once with the confirmed question numbers and a
+one-paragraph summary. It drops everything else from the exam file and writes
+the final files into the checkout. Nothing is committed: the operator reviews
+the files and opens the PR. If it returns a tool error (nothing confirmed),
+quote the error in caveats and leave files empty — never retry it with
+different numbers to make it pass.
 
 Finish by calling the file_exam_report tool exactly once. That call IS the
 deliverable. Do not write the report as prose before or after filing, and do
@@ -385,7 +418,7 @@ Fill it as follows:
                          mechanic, and the reason when not confirmed)
   new_feature_questions  the drill ids whose author named a Kubernetes
                          version and feature, each with that version
-  branch, commit         exactly as open_pull_request returned them, else ""
+  files                  exactly as finalize_exam returned them, else []
   caveats                dropped slots, weight sum if not 100, anything the
                          critic ruled unproven, cluster limitations the tester
                          hit

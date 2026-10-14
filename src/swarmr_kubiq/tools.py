@@ -626,15 +626,14 @@ def diff_task(question_index: int) -> str:
 
 @tool(parse_docstring=True)
 @guard
-def open_pull_request(confirmed_questions: list[int], summary: str) -> str:
-    """Commit the confirmed questions on `exam/<exam>` and open a PR on kubiq.
+def finalize_exam(confirmed_questions: list[int], summary: str) -> str:
+    """Write the final exam with only the confirmed questions. Nothing is committed.
 
     Questions not in `confirmed_questions` are removed from the exam first, so
     nothing the critic refuted or left unproven is filed; the exam is written
-    as a draft when fewer than the planned number remain. Only the files this
-    run wrote are added; the operator's other work in the checkout is left
-    untouched. Returns the branch, the commit and the PR URL — or the exact
-    push command when `gh` is not logged in — for the report.
+    as a draft when fewer than the planned number remain. Git is never
+    touched: the operator reviews the files and opens the PR. Returns the
+    paths written and the suggested branch, commit message and PR body.
 
     Args:
         confirmed_questions: Question numbers (1-based) the critic confirmed.
@@ -650,21 +649,21 @@ def open_pull_request(confirmed_questions: list[int], summary: str) -> str:
         _task_at_staging.pop(idx, None)
     target = current()
     written = write_exam_file()
-    title = f"feat: add {target.exam} ({len(keep)} {target.certification} questions)"
     body = (
         f"{summary.strip()}\n\nEvery question was proven on a live kubiq session: "
         "the grader fails on the untouched namespace, passes after the drill's "
         "own solution, and the session tears down without leftovers."
     )
-    result = pr.open_pr(target, written, title, body)
     return emit(
         {
-            "kind": "pull_request",
+            "kind": "finalized",
             "exam": target.exam,
             "filed": sorted(keep),
             "dropped": dropped,
             "files": [str(p.relative_to(target.kubiq)) for p in written],
-            **result,
+            "suggested_branch": pr.branch_name(target.exam),
+            "suggested_commit": pr.commit_message(target.exam, len(keep)),
+            "pr_body": body,
         }
     )
 
@@ -694,6 +693,6 @@ CRITIC_TOOLS = [
     read_doc,
 ]
 # The commander holds no authoring or cluster tools: its context stays clean,
-# and it cannot fabricate an observation it never received. It files the PR
-# and the report; both are records of what the specialists returned.
-COMMANDER_TOOLS = [open_pull_request, FILE_REPORT_TOOL]
+# and it cannot fabricate an observation it never received. It finalises the
+# files and files the report; both are records of what the specialists returned.
+COMMANDER_TOOLS = [finalize_exam, FILE_REPORT_TOOL]

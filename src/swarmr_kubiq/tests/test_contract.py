@@ -51,8 +51,15 @@ class TestVocabulary:
 
     def test_params_name_the_checkout_and_the_exam(self) -> None:
         declared = [p.name for p in TEAM.params]
-        assert declared == ["kubiq", "exam", "certification", "server", "questions"]
-        assert [p.name for p in TEAM.params if p.required] == ["kubiq", "exam"]
+        assert declared == [
+            "kubiq",
+            "exam",
+            "certification",
+            "server",
+            "version",
+            "questions",
+        ]
+        assert [p.name for p in TEAM.params if p.required] == ["exam"]
 
     def test_registry_exposes_the_team(self) -> None:
         assert get(TEAM.name) is TEAM
@@ -89,10 +96,10 @@ class TestToolSets:
         assert names >= {"similar_drills", "validate_drill_yaml", "search_docs"}
         assert not names & _CLUSTER_TOOLS
 
-    def test_the_commander_files_and_opens_the_pr_but_cannot_author_or_prove(
+    def test_the_commander_finalises_and_reports_but_cannot_author_or_prove(
         self,
     ) -> None:
-        assert _names(COMMANDER_TOOLS) == {TEAM.report_tool, "open_pull_request"}
+        assert _names(COMMANDER_TOOLS) == {TEAM.report_tool, "finalize_exam"}
         assert not _names(COMMANDER_TOOLS) & (_WRITING_TOOLS | _CLUSTER_TOOLS)
 
     def test_every_specialist_is_briefed_by_the_commander(self) -> None:

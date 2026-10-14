@@ -32,11 +32,23 @@ def test_activate_validates_the_checkout_and_fills_the_defaults(tmp_path: Path) 
     assert current() is t
 
 
+def test_kubiq_defaults_to_the_current_directory(tmp_path: Path) -> None:
+    (tmp_path / "drills").mkdir()
+    (tmp_path / "exams").mkdir()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.chdir(tmp_path)
+        assert activate({"exam": "ckad-mock-7"}).kubiq == tmp_path.resolve()
+
+
 def test_activate_rejects_a_directory_that_is_not_a_kubiq_checkout(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(TeamError, match="`kubiq` is empty"):
-        activate({"kubiq": "  ", "exam": "ckad-mock-7"})
+    monkeypatch_cwd = tmp_path / "elsewhere"
+    monkeypatch_cwd.mkdir()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.chdir(monkeypatch_cwd)
+        with pytest.raises(TeamError, match="not a kubiq checkout"):
+            activate({"kubiq": "  ", "exam": "ckad-mock-7"})
     with pytest.raises(TeamError, match="not a directory"):
         activate({"kubiq": str(tmp_path / "nope"), "exam": "ckad-mock-7"})
     plain = tmp_path / "plain"
@@ -131,3 +143,19 @@ def test_the_target_survives_a_thread_that_copies_context(tmp_path: Path) -> Non
     worker.start()
     worker.join()
     assert seen == [root.resolve()]
+
+
+def test_a_version_above_the_test_cluster_refuses_to_start(tmp_path: Path) -> None:
+    from swarmr_kubiq.catalogue import check_version
+
+    (tmp_path / "drills").mkdir()
+    (tmp_path / "exams").mkdir()
+    t = activate({"kubiq": str(tmp_path), "exam": "ckad-mock-7", "version": "1.37"})
+    assert t.version == "1.37"
+    with pytest.raises(TeamError, match=r"cluster kubiq tests on runs v1\.35\.5"):
+        check_version(t, "v1.35.5+k3s1")
+    check_version(t, "v1.37.0")  # equal is fine
+    check_version(t, "")  # unknown cluster: no guess, no refusal
+    check_version(activate({"kubiq": str(tmp_path), "exam": "ckad-mock-7"}), "v1.30.0")
+    with pytest.raises(TeamError, match="not a Kubernetes version"):
+        activate({"kubiq": str(tmp_path), "exam": "ckad-mock-7", "version": "latest"})

@@ -23,14 +23,15 @@ from pathlib import Path
 
 from swarmr.core.team import Param, TeamError
 
-__all__ = ["PARAMS", "Target", "TargetError", "activate", "current"]
+__all__ = ["PARAMS", "Target", "TargetError", "activate", "current", "minor"]
 
 PARAMS = (
     Param(
         "kubiq",
-        "Absolute path of the codectl/kubiq checkout to write the exam into; its "
-        "root (the directory holding `drills/` and `exams/`). Read for the drill "
-        "catalogue, written on a branch when the exam is filed.",
+        "Path of the codectl/kubiq checkout to write the exam into; its root (the "
+        "directory holding `drills/` and `exams/`). Defaults to the current "
+        "directory, so running from inside the checkout needs no flag.",
+        required=False,
     ),
     Param(
         "exam",
@@ -52,6 +53,13 @@ PARAMS = (
         required=False,
     ),
     Param(
+        "version",
+        "Kubernetes minor version to author against, e.g. 1.37: the docs the "
+        "author reads and the features it may use. Must not exceed the version "
+        "of the cluster kubiq tests on; the run refuses to start otherwise.",
+        required=False,
+    ),
+    Param(
         "questions",
         "How many questions the exam should have. Default 21 (CKAD/CKA) or 16 (CKS).",
         required=False,
@@ -59,6 +67,7 @@ PARAMS = (
 )
 
 _EXAM_ID = re.compile(r"^[a-z][a-z0-9-]{2,40}$")
+_VERSION = re.compile(r"^v?(\d+)\.(\d+)")
 _CERTS = {"CKAD": 21, "CKA": 21, "CKS": 16}
 
 
@@ -73,6 +82,7 @@ class Target:
     certification: str
     server: str
     questions: int
+    version: str | None = None
 
     @property
     def exam_file(self) -> Path:
@@ -87,11 +97,14 @@ _current: ContextVar[Target | None] = ContextVar("swarmr_kubiq_target", default=
 
 
 def _checkout(raw: str) -> Path:
-    if not raw.strip():
-        raise TargetError("`kubiq` is empty. Pass the kubiq checkout root as `kubiq`.")
-    path = Path(raw).expanduser().resolve()
+    path = Path(raw.strip() or ".").expanduser().resolve()
     if not path.is_dir():
         raise TargetError(f"kubiq={raw!r} is not a directory.")
+    if not raw.strip() and not (path / "drills").is_dir():
+        raise TargetError(
+            f"{path} is not a kubiq checkout (no `drills/`); run from the checkout "
+            "root or pass it as `kubiq`."
+        )
     for sub in ("drills", "exams"):
         if not (path / sub).is_dir():
             raise TargetError(
@@ -130,12 +143,20 @@ def activate(params: dict[str, str] | None) -> Target:
     server = (given.get("server") or "http://localhost:8080").strip().rstrip("/")
     if not server.startswith(("http://", "https://")):
         raise TargetError(f"server={server!r} must be an http(s) URL.")
+    raw_v = (given.get("version") or "").strip()
+    version: str | None = None
+    if raw_v:
+        m = _VERSION.match(raw_v)
+        if not m:
+            raise TargetError(f"version={raw_v!r} is not a Kubernetes version like 1.37.")
+        version = f"{m.group(1)}.{m.group(2)}"
     target = Target(
         kubiq=kubiq,
         exam=exam,
         certification=cert,
         server=server,
         questions=questions,
+        version=version,
     )
     _current.set(target)
     return target
@@ -150,3 +171,11 @@ def current() -> Target:
             "`build` activates the target from the call's kubiq/exam params."
         )
     return target
+
+
+def minor(version: str) -> tuple[int, int]:
+    """(major, minor) of a version string such as `v1.35.5+k3s1` or `1.37`."""
+    m = _VERSION.match(version.strip())
+    if not m:
+        raise TargetError(f"{version!r} is not a Kubernetes version")
+    return int(m.group(1)), int(m.group(2))

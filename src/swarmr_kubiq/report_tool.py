@@ -2,8 +2,8 @@
 
 One responsibility: the shape of a filed report — the tool the commander calls
 and the plain-text rendering of its arguments. The verdicts come from the tester
-and the critic; the branch and commit come from `pr.py`; nothing in here is
-measured, only rendered.
+and the critic; the files come from `finalize_exam`. Nothing here touches git:
+the operator reviews the files and commits.
 
 The report is a normal tool rather than `response_format=ToolStrategy(...)`:
 that sets `tool_choice="required"`, which the model rejects while thinking is
@@ -59,14 +59,17 @@ def _question_line(position: int, q: dict[str, Any]) -> str:
     return line
 
 
-def _push_command(branch: str) -> str:
-    return f"git push -u origin {branch}"
-
-
-def _pr_command(exam_id: str, branch: str, n_questions: int) -> str:
+def _suggested_commands(exam_id: str, files: list[str], n_questions: int) -> list[str]:
+    branch = f"exam/{exam_id}" if exam_id else "exam/<id>"
     title = f"feat: add {exam_id}" if exam_id else "feat: add exam"
     body = f"{n_questions} questions, every one proven on a live kubiq session."
-    return f'gh pr create --base main --head {branch} --title "{title}" --body "{body}"'
+    return [
+        f"git checkout -b {branch}",
+        "git add -- " + " ".join(files),
+        f'git commit -m "{title}"',
+        f"git push -u origin {branch}",
+        f'gh pr create --base main --head {branch} --title "{title}" --body "{body}"',
+    ]
 
 
 def render_report_args(args: dict[str, Any]) -> str:
@@ -105,15 +108,17 @@ def render_report_args(args: dict[str, Any]) -> str:
     else:
         lines.append("  none")
 
-    branch = _text(args.get("branch"))
-    commit = _text(args.get("commit"))
-    lines += ["", "PR"]
-    if branch:
-        lines.append(f"  branch {branch}" + (f" at {commit}" if commit else ""))
-        lines.append(f"  {_push_command(branch)}")
-        lines.append(f"  {_pr_command(exam_id, branch, len(questions))}")
+    files = args.get("files") or []
+    if isinstance(files, str):
+        files = [files]
+    files = [_text(f) for f in files if _text(f)]
+    lines += ["", "FILES WRITTEN (not committed)"]
+    if files:
+        lines += [f"  {f}" for f in files]
+        lines += ["", "TO OPEN THE PR"]
+        lines += [f"  {c}" for c in _suggested_commands(exam_id, files, len(questions))]
     else:
-        lines.append("  nothing committed")
+        lines.append("  none")
 
     if caveats := _text(args.get("caveats")):
         lines += ["", "CAVEATS", f"  {caveats}"]
@@ -125,8 +130,7 @@ def file_exam_report(
     exam_id: str,
     questions: list[dict[str, Any]],
     new_feature_questions: list[str],
-    branch: str,
-    commit: str,
+    files: list[str],
     caveats: str = "",
 ) -> str:
     """File the final exam report. Call this exactly once, as your last action.
@@ -142,14 +146,13 @@ def file_exam_report(
         new_feature_questions: Drill ids that cover recent-version material,
             each followed by the version, for example "ckad-mock-7-q04 (1.37)".
             Empty when the exam has none.
-        branch: The branch `open_pr` created, for example "exam/ckad-mock-7".
-            "" when nothing was committed.
-        commit: The commit sha `open_pr` reported. "" when nothing was committed.
+        files: The paths `finalize_exam` returned, relative to the kubiq
+            checkout. Empty when nothing was finalised.
         caveats: What the reader must know before merging: questions left
             unproven and why, a kubiq restart that failed, a session the
             harness could not create.
     """
-    _ = (exam_id, questions, new_feature_questions, branch, commit, caveats)
+    _ = (exam_id, questions, new_feature_questions, files, caveats)
     # The arguments are the report. Returning a receipt keeps the transcript
     # small; the caller reads the filed arguments from the run stream.
     return "Report filed. Stop here; do not repeat it in prose."

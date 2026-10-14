@@ -29,7 +29,7 @@ Legend: [ ] todo · [~] in progress · [x] done · [!] blocked
 - [x] `prompts.py` — commander, author, tester, critic, CONTRACT, SWEEP_REQUEST. Rules baked in: uniqueness vs catalogue; "fix the solution, never the task"; negative control; CKAD curriculum weights; no vendor images (allowed set from drill.py).
 - [x] `agent.py` — `build(run)`, `profile_target(run)`; roster commander/author/tester/critic; filesystem permissions.
 - [x] `report_tool.py` — `file_exam_report` tool + `render_report_args`: per-question verdict table, files written, PR branch/commit suggestion.
-- [x] `pr.py` — writes exam + drills into the kubiq checkout on a branch `exam/<exam>` and commits; opens a PR with `gh` when available, else prints the push command.
+- [x] `pr.py` — naming convention only (branch/commit message). The team never runs git: `finalize_exam` writes files, the report prints the commands for the operator.
 - [x] `__init__.py` — `TEAM` declaration (Lazy build/profile/render_report).
 
 ## 4. Tests (pytest, beside the code, excluded from wheel)
@@ -39,10 +39,11 @@ Legend: [ ] todo · [~] in progress · [x] done · [!] blocked
 - [x] test_similarity.py — renamed run+expose pair ≥ THRESHOLD, headless Service < THRESHOLD, symmetry, nearest ranking with reason
 - [x] test_docs.py — mocked httpx transport (JSON + SSE), isError/transport failures degrade, whats_new dedupe
 - [x] test_harness.py — fake kubiq + fake kubectl: leftover refusal, call order, negative control, heredoc intact, verdict JSON, leftovers, prove_exam, stage_exam round trip/draft/weights
-- [x] test_report.py — render_report_args (+ test_pr.py — open_pr with a fake runner)
+- [x] test_report.py — render_report_args (+ test_pr.py — naming)
 - [x] test_target.py — params validation
 
 ## 5. Verification
+- [x] Harness smoke on live kubiq (ckad-mock-6 q1): proven, negative control failed, converged in 15.7 s, teardown clean
 - [x] `restart_server` refuses while any session is open (a recreate would kill a person's exam)
 - [x] `uv venv && uv pip install -e ../swarmr -e ".[dev]"`; pytest (106), ruff, pyright clean
 - [x] `teams --list` shows exam_author; `teams --target exam_author --kubiq ../kubiq --exam ckad-mock-7` profiles without a model key
@@ -50,4 +51,4 @@ Legend: [ ] todo · [~] in progress · [x] done · [!] blocked
 
 ## Decisions
 - Test strategy: kubiq reads drills from disk at startup, so the harness writes the candidate files into the kubiq checkout and restarts the server (`docker compose up -d --build --force-recreate`). A dedicated "load exam from request" endpoint would avoid restarts but is out of scope for this repo.
-- Reviews land as a PR; kubiq itself never depends on this package.
+- The team never commits: files are written into the checkout, the operator reviews and opens the PR. kubiq itself never depends on this package.

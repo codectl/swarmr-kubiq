@@ -42,8 +42,7 @@ _FULL = {
         },
     ],
     "new_feature_questions": ["ckad-mock-7-q03 (1.37)"],
-    "branch": "exam/ckad-mock-7",
-    "commit": "a1b2c3d",
+    "files": ["exams/ckad-mock-7.yaml", "drills/ckad-mock-7/q01-expose.yaml"],
     "caveats": "q03 needs a cluster with ImageVolume enabled.",
 }
 
@@ -56,7 +55,9 @@ def test_full_filing_renders_every_question_and_the_push_command() -> None:
     assert "02. Sidecar container — 6 pts — refuted (3)" in text
     assert "03. Image volume — 5 pts — unproven (2) [media]" in text
     assert "- ckad-mock-7-q03 (1.37)" in text
-    assert "branch exam/ckad-mock-7 at a1b2c3d" in text
+    assert "FILES WRITTEN (not committed)" in text
+    assert "  drills/ckad-mock-7/q01-expose.yaml" in text
+    assert "git add -- exams/ckad-mock-7.yaml drills/ckad-mock-7/q01-expose.yaml" in text
     assert "git push -u origin exam/ckad-mock-7" in text
     assert 'gh pr create --base main --head exam/ckad-mock-7 --title "feat: add' in text
     assert "ImageVolume enabled" in text
@@ -67,7 +68,7 @@ def test_empty_filing_does_not_raise() -> None:
     text = render_report_args({})
     assert "EXAM (unnamed) — 0 questions" in text
     assert "none filed" in text
-    assert "nothing committed" in text
+    assert "FILES WRITTEN (not committed)\n  none" in text
 
 
 def test_odd_shapes_are_tolerated() -> None:
@@ -75,12 +76,12 @@ def test_odd_shapes_are_tolerated() -> None:
         {
             "questions": [{"title": "t", "weight": "x", "verdict": "maybe"}, "junk"],
             "new_feature_questions": "single",
-            "branch": "exam/x",
+            "files": "exams/x.yaml",
         }
     )
     assert "01. t — 0 pts — unproven (0)" in text
     assert "- single" in text
-    assert "git push -u origin exam/x" in text
+    assert "git push -u origin exam/<id>" in text
 
 
 def test_tool_name_and_receipt() -> None:
@@ -90,8 +91,7 @@ def test_tool_name_and_receipt() -> None:
             "exam_id": "e",
             "questions": [],
             "new_feature_questions": [],
-            "branch": "",
-            "commit": "",
+            "files": [],
         }
     )
     assert "filed" in receipt
