@@ -22,10 +22,10 @@ from swarmr.core.team import RunContext, TeamBuild
 
 from swarmr_kubiq import prompts
 from swarmr_kubiq.catalogue import banner, profile_catalogue, render_facts
-from swarmr_kubiq.report_tool import FILE_REPORT_TOOL
 from swarmr_kubiq.target import activate
 from swarmr_kubiq.tools import (
     AUTHOR_TOOLS,
+    COMMANDER_TOOLS,
     CRITIC_TOOLS,
     TESTER_TOOLS,
     reset_staging,
@@ -143,7 +143,7 @@ def build(run: RunContext) -> TeamBuild:
         # The commander holds no authoring or cluster tools on purpose: its
         # context stays clean, and it cannot fabricate an observation it never
         # received. The one tool it does hold files the final report.
-        tools=[FILE_REPORT_TOOL],
+        tools=COMMANDER_TOOLS,
         system_prompt=prompts.commander(facts),
         subagents=_subagents(model, facts, run.attribution),
         # Planning belongs in write_todos, which the harness already provides.

@@ -89,8 +89,11 @@ class TestToolSets:
         assert names >= {"similar_drills", "validate_drill_yaml", "search_docs"}
         assert not names & _CLUSTER_TOOLS
 
-    def test_the_commander_holds_only_the_report_tool(self) -> None:
-        assert _names(COMMANDER_TOOLS) == {TEAM.report_tool}
+    def test_the_commander_files_and_opens_the_pr_but_cannot_author_or_prove(
+        self,
+    ) -> None:
+        assert _names(COMMANDER_TOOLS) == {TEAM.report_tool, "open_pull_request"}
+        assert not _names(COMMANDER_TOOLS) & (_WRITING_TOOLS | _CLUSTER_TOOLS)
 
     def test_every_specialist_is_briefed_by_the_commander(self) -> None:
         """Nobody starts from the caller's request: the author needs a slot, the

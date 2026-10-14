@@ -30,7 +30,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from swarmr_kubiq import docs, harness, kubiq_api, similarity
+from swarmr_kubiq import docs, harness, kubiq_api, pr, similarity
 from swarmr_kubiq.catalogue import Catalogue, profile_catalogue
 from swarmr_kubiq.drill import (
     Drill,
@@ -624,6 +624,51 @@ def diff_task(question_index: int) -> str:
     )
 
 
+@tool(parse_docstring=True)
+@guard
+def open_pull_request(confirmed_questions: list[int], summary: str) -> str:
+    """Commit the confirmed questions on `exam/<exam>` and open a PR on kubiq.
+
+    Questions not in `confirmed_questions` are removed from the exam first, so
+    nothing the critic refuted or left unproven is filed; the exam is written
+    as a draft when fewer than the planned number remain. Only the files this
+    run wrote are added; the operator's other work in the checkout is left
+    untouched. Returns the branch, the commit and the PR URL — or the exact
+    push command when `gh` is not logged in — for the report.
+
+    Args:
+        confirmed_questions: Question numbers (1-based) the critic confirmed.
+        summary: One paragraph for the PR body: what the exam covers and which
+            questions exercise recent Kubernetes features.
+    """
+    keep = {_question(n) for n in confirmed_questions}
+    if not keep:
+        raise ValueError("no confirmed questions: nothing to file")
+    dropped = sorted(set(_staged) - keep)
+    for idx in dropped:
+        del _staged[idx]
+        _task_at_staging.pop(idx, None)
+    target = current()
+    written = write_exam_file()
+    title = f"feat: add {target.exam} ({len(keep)} {target.certification} questions)"
+    body = (
+        f"{summary.strip()}\n\nEvery question was proven on a live kubiq session: "
+        "the grader fails on the untouched namespace, passes after the drill's "
+        "own solution, and the session tears down without leftovers."
+    )
+    result = pr.open_pr(target, written, title, body)
+    return emit(
+        {
+            "kind": "pull_request",
+            "exam": target.exam,
+            "filed": sorted(keep),
+            "dropped": dropped,
+            "files": [str(p.relative_to(target.kubiq)) for p in written],
+            **result,
+        }
+    )
+
+
 # Tool sets per role. Only the tester proves and only the tester has a shell;
 # the author designs and stages but never touches the cluster, so a claim from
 # it that a question works is, by construction, an inference. The critic grades
@@ -649,5 +694,6 @@ CRITIC_TOOLS = [
     read_doc,
 ]
 # The commander holds no authoring or cluster tools: its context stays clean,
-# and it cannot fabricate an observation it never received.
-COMMANDER_TOOLS = [FILE_REPORT_TOOL]
+# and it cannot fabricate an observation it never received. It files the PR
+# and the report; both are records of what the specialists returned.
+COMMANDER_TOOLS = [open_pull_request, FILE_REPORT_TOOL]

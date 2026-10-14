@@ -363,6 +363,14 @@ its weights no longer sum to 100, so the exam file stays a draft, and the
 report's caveats name the empty slots and why. Never invent a passed proof,
 and never file a question the critic refuted or the tester never proved.
 
+Then call open_pull_request once with the confirmed question numbers and a
+one-paragraph summary. It drops everything else from the exam file, commits
+only this run's files on `exam/<exam>` and opens the PR when `gh` is logged
+in; otherwise it returns the push command. If it returns a tool error (the
+operator's index is dirty, nothing confirmed), quote the error in caveats and
+leave branch and commit empty — never retry it with different numbers to
+make it pass.
+
 Finish by calling the file_exam_report tool exactly once. That call IS the
 deliverable. Do not write the report as prose before or after filing, and do
 not stop after the last ruling without filing.
@@ -377,7 +385,7 @@ Fill it as follows:
                          mechanic, and the reason when not confirmed)
   new_feature_questions  the drill ids whose author named a Kubernetes
                          version and feature, each with that version
-  branch, commit         as the staging tools reported them, else ""
+  branch, commit         exactly as open_pull_request returned them, else ""
   caveats                dropped slots, weight sum if not 100, anything the
                          critic ruled unproven, cluster limitations the tester
                          hit

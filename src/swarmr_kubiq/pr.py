@@ -79,11 +79,16 @@ def _relative(target: Target, written: list[Path]) -> list[str]:
     return sorted(set(rel))
 
 
-def _foreign_changes(status: str, allowed: list[str]) -> list[str]:
-    """Porcelain lines naming paths that are neither written nor inside a written dir."""
+def _foreign_staged(status: str, allowed: list[str]) -> list[str]:
+    """Porcelain lines with a staged change (index column set) outside `allowed`.
+
+    Unstaged edits and untracked files are the operator's work in progress and
+    `git commit` without `-a` leaves them alone; only what is already in the
+    index would ride into the exam commit, so only that is refused.
+    """
     foreign: list[str] = []
     for line in status.splitlines():
-        if len(line) < 4:
+        if len(line) < 4 or line[0] in " ?!":
             continue
         path = line[3:].split(" -> ")[-1].strip().strip('"')
         if any(path == a or path.startswith(a.rstrip("/") + "/") for a in allowed):
@@ -111,7 +116,7 @@ def open_pr(
     Returns {branch, commit, pr_url} when the PR was created, otherwise
     {branch, commit, pr_url: None, push: "<git push command>"}. Raises
     `PrError` when nothing was written, a path lies outside the checkout, or
-    the checkout holds changes to files outside `written`.
+    the index already holds staged changes to files outside `written`.
     """
     if not written:
         raise PrError("nothing to commit: no files were written")
@@ -119,11 +124,11 @@ def open_pr(
     paths = _relative(target, written)
 
     status = _git(run, cwd, "status", "--porcelain", "--untracked-files=all").out
-    if foreign := _foreign_changes(status, paths):
+    if foreign := _foreign_staged(status, paths):
         listed = ", ".join(foreign[:5]) + (" …" if len(foreign) > 5 else "")
         raise PrError(
-            f"the checkout has uncommitted changes outside the exam ({listed}); "
-            "commit or stash them first so they are not swept into the exam commit"
+            f"the index holds staged changes outside the exam ({listed}); commit "
+            "or unstage them first so they are not swept into the exam commit"
         )
 
     branch = branch_name(target.exam)

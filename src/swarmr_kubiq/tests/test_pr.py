@@ -107,12 +107,23 @@ def test_switches_to_an_existing_branch(
     assert git.of("git", "checkout") == [["git", "checkout", "exam/ckad-mock-7"]]
 
 
-def test_refuses_when_foreign_files_are_dirty(tmp_path: Path) -> None:
-    git = FakeGit(status=" M src/main.rs\n?? exams/ckad-mock-7.yaml\n")
+def test_refuses_when_foreign_changes_are_staged(tmp_path: Path) -> None:
+    git = FakeGit(status="M  src/main.rs\n?? exams/ckad-mock-7.yaml\n")
     with pytest.raises(PrError, match=r"src/main\.rs"):
         open_pr(_target(tmp_path), _written(tmp_path), "t", "b", run=git)
     assert not git.of("git", "checkout")
     assert not git.of("git", "add")
+
+
+def test_unstaged_and_untracked_foreign_work_is_left_alone(tmp_path: Path) -> None:
+    """The operator's work in progress is normal; `git add -- <ours>` plus a
+    commit without `-a` never touches it."""
+    git = FakeGit(
+        status=" M Makefile\n?? drills/ckad-mock-6/\n?? exams/ckad-mock-7.yaml\n"
+    )
+    open_pr(_target(tmp_path), _written(tmp_path), "t", "b", run=git)
+    (add,) = git.of("git", "add")
+    assert "Makefile" not in add and "drills/ckad-mock-6/" not in add
 
 
 def test_refuses_paths_outside_the_checkout(tmp_path: Path) -> None:
