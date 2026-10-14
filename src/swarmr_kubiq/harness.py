@@ -18,6 +18,7 @@ replace them.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -38,13 +39,13 @@ from swarmr_kubiq.kubiq_api import KubiqError
 from swarmr_kubiq.target import Target
 
 __all__ = [
-    "SETTLE_LONG",
-    "SETTLE_SHORT",
+    "SETTLE_MAX",
+    "SETTLE_POLL",
     "TEARDOWN_KINDS",
     "Verdict",
     "prove_exam",
     "prove_question",
-    "settle_seconds",
+    "settle_cap",
     "solution_script",
     "stage_exam",
 ]
@@ -52,12 +53,10 @@ __all__ = [
 _run = kubiq_api.run
 _sleep = time.sleep
 
-# Seconds between running the solution and grading: a Pod has to schedule and
-# pull before its status says Running. Rollouts, Helm releases, Jobs and probes
-# take visibly longer than a bare Pod.
-SETTLE_SHORT = 8.0
-SETTLE_LONG = 30.0
-_SLOW = re.compile(r"rollout|helm|job|probe", re.IGNORECASE)
+# A solution's effects land asynchronously (a PV rebinding, a rollout, a Job
+# completing); grading is polled until every check passes or this cap elapses.
+SETTLE_MAX = 90.0
+SETTLE_POLL = 3.0
 
 # Cluster-scoped kinds an exam may create and kubiq's teardown must remove.
 TEARDOWN_KINDS = ("namespaces", "crds", "pv", "clusterrole", "clusterrolebinding")
@@ -179,9 +178,9 @@ def solution_script(solution: str) -> str:
     return "\n".join(kept).strip() + "\n"
 
 
-def settle_seconds(solution: str) -> float:
-    """How long to let the cluster converge before grading."""
-    return SETTLE_LONG if _SLOW.search(solution) else SETTLE_SHORT
+def settle_cap() -> float:
+    """Seconds to wait for checks to converge; KUBIQ_SETTLE_SECONDS, default 90."""
+    return float(os.environ.get("KUBIQ_SETTLE_SECONDS", SETTLE_MAX))
 
 
 def prove_question(
@@ -204,8 +203,9 @@ def prove_question(
     try:
         client.wait_ready(sid)
         negative = client.check(sid, question_index)
-        rc, out, err, settle = _solve(client, sid, drill, namespace)
-        after_solve = client.check(sid, question_index)
+        rc, out, err, settle, after_solve = _solve(
+            client, sid, question_index, drill, namespace
+        )
         client.finish(sid)
     finally:
         client.delete(sid)
@@ -242,14 +242,18 @@ def prove_exam(
     before = _snapshot()
     sid = str(client.create_session(target.exam)["id"])
     negatives: list[dict[str, Any]] = []
-    runs: list[tuple[int, str, str, float]] = []
+    runs: list[tuple[int, str, str, float, dict[str, Any]]] = []
     try:
         client.wait_ready(sid)
         for index, question in enumerate(exam.questions):
             negatives.append(client.check(sid, index))
             runs.append(
                 _solve(
-                    client, sid, by_id[question.drill], question.namespace or "default"
+                    client,
+                    sid,
+                    index,
+                    by_id[question.drill],
+                    question.namespace or "default",
                 )
             )
         result = client.finish(sid)
@@ -262,7 +266,7 @@ def prove_exam(
     verdicts: list[Verdict] = []
     for index, question in enumerate(exam.questions):
         grade = graded.get(index, {})
-        rc, out, err, settle = runs[index]
+        rc, out, err, settle, _ = runs[index]
         verdicts.append(
             Verdict(
                 drill=question.drill,
@@ -295,12 +299,21 @@ def _refuse_leftover(client: SessionClient) -> None:
 
 
 def _solve(
-    client: SessionClient, sid: str, drill: Drill, namespace: str
-) -> tuple[int, str, str, float]:
+    client: SessionClient, sid: str, question_index: int, drill: Drill, namespace: str
+) -> tuple[int, str, str, float, dict[str, Any]]:
+    """Run the solution, then grade repeatedly until it passes or the cap elapses.
+
+    Returns the shell result, the seconds spent converging and the last grade.
+    """
     rc, out, err = client.shell_exec(sid, solution_script(drill.solution), namespace)
-    settle = settle_seconds(drill.solution)
-    _sleep(settle)
-    return rc, out, err, settle
+    cap = settle_cap()
+    started = time.monotonic()
+    while True:
+        report = client.check(sid, question_index)
+        elapsed = time.monotonic() - started
+        if report.get("passed") or elapsed >= cap:
+            return rc, out, err, round(elapsed, 1), report
+        _sleep(SETTLE_POLL)
 
 
 def _results(report: dict[str, Any]) -> list[dict[str, Any]]:

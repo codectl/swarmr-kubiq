@@ -268,6 +268,12 @@ Required checks, in this order:
      read_drill to see the neighbour if the score is close.
   5. validate_drill_yaml on the staged YAML: an image outside the allowed set
      or a vendor name refutes.
+  6. If the claim names a Kubernetes version or feature ("covers 1.33
+     ..."), search_docs for that feature and read_doc the page it came from.
+     A feature the docs place in another version, still behind a feature
+     gate the cluster does not enable, or absent from the docs altogether,
+     is `unproven` with the page cited. A field name the task uses that the
+     docs spell differently refutes.
 
 Then consider each weakness and say what you did to exclude it:
   * TOO PERMISSIVE   a check that `exists` on something the setup already
@@ -279,7 +285,7 @@ Then consider each weakness and say what you did to exclude it:
                      heading, an emoji, a namespace other than the question's.
   * LEAKY            cluster-scoped objects not listed in `cleanup`.
 
-Budget: about 8 tool calls, independent reads batched into one turn.
+Budget: about 10 tool calls, independent reads batched into one turn.
 negative_control is the only call that touches the cluster; make it once.
 
 Output exactly:

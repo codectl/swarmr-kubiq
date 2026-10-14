@@ -77,6 +77,12 @@ class TestToolSets:
         assert {"negative_control", "diff_task"} <= _names(CRITIC_TOOLS)
         assert not _names(CRITIC_TOOLS) & _WRITING_TOOLS
 
+    def test_author_and_critic_both_read_the_upstream_docs(self) -> None:
+        """The author grounds a feature question in the docs; the critic must be
+        able to check that grounding with the same source, not take it on trust."""
+        for tools in (AUTHOR_TOOLS, CRITIC_TOOLS):
+            assert {"search_docs", "read_doc"} <= _names(tools)
+
     def test_the_author_stages_but_never_touches_the_cluster(self) -> None:
         names = _names(AUTHOR_TOOLS)
         assert names >= _WRITING_TOOLS

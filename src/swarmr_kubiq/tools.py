@@ -645,6 +645,8 @@ CRITIC_TOOLS = [
     catalogue_search,
     similar_drills,
     validate_drill_yaml,
+    search_docs,
+    read_doc,
 ]
 # The commander holds no authoring or cluster tools: its context stays clean,
 # and it cannot fabricate an observation it never received.

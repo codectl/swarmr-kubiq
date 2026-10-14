@@ -239,7 +239,7 @@ def test_negative_control_then_solution_then_grade_then_teardown(
     assert verdict.results[0]["ok"] is True
     assert verdict.stdout == "pod/web created"
     assert verdict.session == "abc12345"
-    assert no_sleep == [harness.SETTLE_SHORT]
+    assert no_sleep == [], "a grade that passes first time needs no polling"
     assert kubiq.alive == set(), "the session it created is deleted"
 
 
@@ -276,16 +276,48 @@ def test_solution_script_drops_only_comment_lines_outside_heredocs() -> None:
     assert harness.solution_script('grep "#" <<<"a#b"\n# gone\n') == 'grep "#" <<<"a#b"\n'
 
 
-def test_settle_is_longer_for_slow_resources() -> None:
-    assert harness.settle_seconds("kubectl run x --image=nginx") == harness.SETTLE_SHORT
-    assert (
-        harness.settle_seconds("kubectl rollout status deploy/x") == harness.SETTLE_LONG
+class _SlowKubiq(FakeKubiq):
+    """Grades pass only on the Nth check after the solution ran."""
+
+    def __init__(self, passes_on: int) -> None:
+        super().__init__()
+        self.passes_on = passes_on
+        self.graded_after_solve = 0
+
+    def check(self, sid: str, question: int) -> dict[str, Any]:
+        report = super().check(sid, question)
+        if question in self.solved:
+            self.graded_after_solve += 1
+            if self.graded_after_solve < self.passes_on:
+                report = {**report, "passed": False}
+        return report
+
+
+def test_grading_is_polled_until_the_cluster_converges(
+    tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
+) -> None:
+    kubiq = _SlowKubiq(passes_on=3)
+    verdict = harness.prove_question(
+        kubiq, _target(tmp_path), "ckad-mock-7", 0, _drill(), "ns"
     )
-    assert harness.settle_seconds("helm install x ./chart") == harness.SETTLE_LONG
-    assert (
-        harness.settle_seconds("kubectl create job j --image=busybox")
-        == harness.SETTLE_LONG
+    assert verdict.passed is True
+    assert no_sleep == [harness.SETTLE_POLL, harness.SETTLE_POLL]
+
+
+def test_grading_stops_at_the_settle_cap(
+    tmp_path: Path,
+    no_sleep: list[float],
+    kubectl: FakeKubectl,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KUBIQ_SETTLE_SECONDS", "0")
+    kubiq = _SlowKubiq(passes_on=99)
+    verdict = harness.prove_question(
+        kubiq, _target(tmp_path), "ckad-mock-7", 0, _drill(), "ns"
     )
+    assert verdict.passed is False
+    assert no_sleep == [], "a zero cap grades exactly once"
+    assert "finish" in [c[0] for c in kubiq.calls], "the exam is still ended"
 
 
 def test_verdict_json_carries_kind_and_the_fields_the_report_reads(
@@ -359,10 +391,8 @@ def test_prove_exam_solves_everything_in_one_session(
     assert [v.drill for v in verdicts] == ["pod-a", "pod-b"]
     assert [v.namespace for v in verdicts] == ["ns0", "ns1"]
     assert all(v.passed and v.negative_control_ok for v in verdicts)
-    assert [v.settle_seconds for v in verdicts] == [
-        harness.SETTLE_SHORT,
-        harness.SETTLE_LONG,
-    ]
+    assert all(v.settle_seconds >= 0 for v in verdicts)
+    assert no_sleep == []
     assert [s[1] for s in kubiq.scripts] == ["ns0", "ns1"]
 
 
