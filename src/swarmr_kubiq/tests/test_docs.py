@@ -94,7 +94,11 @@ def test_search_parses_hits_and_reuses_session() -> None:
     assert server.calls == [
         {
             "name": "search_docs",
-            "arguments": {"query": "pod disruption budget", "limit": 2},
+            "arguments": {
+                "query": "pod disruption budget",
+                "limit": 2,
+                "sources": ["kubernetes"],
+            },
         }
     ]
     # initialize, initialized notification, tools/call: session header from call two on.

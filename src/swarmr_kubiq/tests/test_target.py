@@ -75,7 +75,7 @@ def test_certification_is_upper_cased_and_sets_the_question_count(
 ) -> None:
     root = _checkout(tmp_path)
     cks = activate({"kubiq": str(root), "exam": "cks-mock-4", "certification": "cks"})
-    assert (cks.certification, cks.questions) == ("CKS", 16)
+    assert (cks.certification, cks.questions) == ("CKS", 19)
     t = activate({"kubiq": str(root), "exam": "cka-mock-6", "certification": " cka "})
     assert (t.certification, t.questions) == ("CKA", 21)
     with pytest.raises(TeamError, match="certification='CKX' is not one of"):

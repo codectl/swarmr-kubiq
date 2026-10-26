@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from swarmr_kubiq.kubiq_api import KubiqError
+from swarmr_kubiq.kubiq_api import FatalError, KubiqError
 from swarmr_kubiq.target import TargetError
 
 __all__ = ["MAX_BYTES", "emit", "guard"]
@@ -52,6 +52,8 @@ def guard(fn: Callable[..., str]) -> Callable[..., str]:
             return f"tool error: {exc}"
         except TargetError as exc:
             return f"tool error: {exc}"
+        except FatalError as exc:
+            return f"tool error: FATAL: {exc}"
         except KubiqError as exc:
             return f"tool error: {exc}"
         except httpx.HTTPStatusError as exc:

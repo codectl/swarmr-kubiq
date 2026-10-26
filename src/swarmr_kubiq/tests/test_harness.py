@@ -24,7 +24,7 @@ from swarmr_kubiq.drill import (
     load_drill,
     load_exam,
 )
-from swarmr_kubiq.kubiq_api import KubiqError
+from swarmr_kubiq.kubiq_api import FatalError
 from swarmr_kubiq.target import Target
 
 SOLUTION_WITH_HEREDOC = """\
@@ -89,6 +89,15 @@ def _target(tmp_path: Path, questions: int = 2) -> Target:
     )
 
 
+def _prove_one(
+    kubiq: FakeKubiq, tmp_path: Path, drill: Drill | None = None, namespace: str = "ns0"
+) -> harness.Verdict:
+    """Prove a one-question exam; the single verdict."""
+    drill = drill or _drill()
+    exam = _exam([Question(drill.id, 100, namespace)])
+    return harness.prove_exam(kubiq, _target(tmp_path, 1), exam, [drill])[0]
+
+
 class FakeKubiq:
     """A kubiq that grades by whether the solution has been run."""
 
@@ -112,8 +121,10 @@ class FakeKubiq:
         self.calls.append(("sessions", None))
         return list(self.leftover)
 
-    def create_session(self, exam_id: str) -> dict[str, Any]:
-        self.calls.append(("create", exam_id))
+    def create_session(
+        self, exam_id: str, questions: list[int] | None = None
+    ) -> dict[str, Any]:
+        self.calls.append(("create", (exam_id, questions)))
         self.alive.add("abc12345")
         return {"id": "abc12345", "exam_id": exam_id, "state": "provisioning"}
 
@@ -130,8 +141,8 @@ class FakeKubiq:
             "results": [{"name": "web runs nginx", "ok": ok, "detail": detail}],
         }
 
-    def check(self, sid: str, question: int) -> dict[str, Any]:
-        self.calls.append(("check", question))
+    def grade(self, sid: str, question: int) -> dict[str, Any]:
+        self.calls.append(("grade", question))
         self.last_checked = question
         return self._grade(question)
 
@@ -164,9 +175,14 @@ class FakeKubiq:
 
 
 class FakeKubectl:
-    """`kubectl get <kind> -o name` answering from a scripted cluster."""
+    """`kubectl get <kind> -o name` answering from a scripted cluster, and
+    `kubectl get pods -n <ns> -o json` answering from `pods` (empty: settled)."""
 
-    def __init__(self, after: dict[str, list[str]] | None = None) -> None:
+    def __init__(
+        self,
+        after: dict[str, list[str]] | None = None,
+        pods: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.before = {
             "namespaces": ["namespace/default", "namespace/kube-system"],
             "crds": [],
@@ -175,16 +191,29 @@ class FakeKubectl:
             "clusterrolebinding": [],
         }
         self.after = after
+        self.pods = pods or []
         self.argv: list[list[str]] = []
         self.session_created = False
 
     def __call__(
-        self, argv: list[str], *, timeout: float, cwd: Path | None = None
+        self,
+        argv: list[str],
+        *,
+        timeout: float,
+        cwd: Path | None = None,
+        stdin: str | None = None,
     ) -> tuple[int, str, str]:
         self.argv.append(argv)
+        if argv[:3] == ["kubectl", "get", "pods"]:
+            assert argv[-2:] == ["-o", "json"]
+            return 0, json.dumps({"items": self.pods}), ""
         assert argv[:2] == ["kubectl", "get"] and argv[-2:] == ["-o", "name"]
         table = self.after if (self.after and self.session_created) else self.before
         return 0, "\n".join(table[argv[2]]) + "\n", ""
+
+    def pod_queries(self) -> list[str]:
+        """Namespaces whose Pods were polled, in order."""
+        return [a[4] for a in self.argv if a[:3] == ["kubectl", "get", "pods"]]
 
 
 @pytest.fixture
@@ -204,34 +233,52 @@ def kubectl(monkeypatch: pytest.MonkeyPatch) -> FakeKubectl:
 def test_refuses_when_a_session_it_did_not_create_exists(
     tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
 ) -> None:
-    kubiq = FakeKubiq(leftover=[{"id": "someone", "state": "ready"}])
-    with pytest.raises(KubiqError, match="someone"):
-        harness.prove_question(
-            kubiq, _target(tmp_path), "ckad-mock-7", 0, _drill(), "ns0"
-        )
+    kubiq = FakeKubiq(
+        leftover=[{"id": "someone", "exam_id": "ckad-mock-6", "state": "ready"}]
+    )
+    with pytest.raises(FatalError, match=r"someone.*Do not retry"):
+        _prove_one(kubiq, tmp_path)
     assert [c[0] for c in kubiq.calls] == ["sessions"]
     assert kubectl.argv == []
 
 
-def test_negative_control_then_solution_then_grade_then_teardown(
+def test_reclaims_a_session_an_earlier_run_of_this_exam_left(
+    tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
+) -> None:
+    """Nobody can start a draft exam, so a session on it is ours: delete and go on."""
+    kubiq = FakeKubiq(
+        leftover=[{"id": "stale", "exam_id": "ckad-mock-7", "state": "ready"}]
+    )
+    verdict = _prove_one(kubiq, tmp_path)
+    assert verdict.passed
+    assert kubiq.calls[:2] == [("sessions", None), ("delete", "stale")]
+
+
+def test_negative_control_then_settle_then_solution_then_grade_then_teardown(
     tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
 ) -> None:
     kubiq = FakeKubiq()
-    verdict = harness.prove_question(
-        kubiq, _target(tmp_path), "ckad-mock-7", 3, _drill(), "ckad04-pod"
-    )
+    exam = _exam([Question(f"pod-{i}", 25, f"ckad0{i + 1}-pod") for i in range(4)])
+    drills = [_drill(f"pod-{i}") for i in range(4)]
+    [verdict] = harness.prove_exam(kubiq, _target(tmp_path, 4), exam, drills, [3])
     assert [c[0] for c in kubiq.calls] == [
         "sessions",
         "create",
         "wait_ready",
-        "check",
+        "grade",
         "shell_exec",
-        "check",
+        "grade",
         "finish",
         "delete",
     ]
-    assert kubiq.calls[3] == ("check", 3), "question index passes through 0-based"
+    assert kubiq.calls[3] == ("grade", 3), "question index passes through 0-based"
     assert kubiq.scripts[0][1] == "ckad04-pod"
+    assert kubectl.pod_queries() == ["ckad04-pod"], "setup settles before the solution"
+    pods_at = kubectl.argv.index(
+        ["kubectl", "get", "pods", "-n", "ckad04-pod", "-o", "json"]
+    )
+    assert pods_at > 0, "the baseline snapshot comes first"
+    assert verdict.question == 3
     assert verdict.negative_control_ok is True
     assert verdict.passed is True
     assert verdict.proven is True
@@ -239,6 +286,7 @@ def test_negative_control_then_solution_then_grade_then_teardown(
     assert verdict.results[0]["ok"] is True
     assert verdict.stdout == "pod/web created"
     assert verdict.session == "abc12345"
+    assert verdict.setup_settle_seconds >= 0
     assert no_sleep == [], "a grade that passes first time needs no polling"
     assert kubiq.alive == set(), "the session it created is deleted"
 
@@ -246,10 +294,7 @@ def test_negative_control_then_solution_then_grade_then_teardown(
 def test_a_check_that_passes_unsolved_fails_the_negative_control(
     tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
 ) -> None:
-    kubiq = FakeKubiq(passes_unsolved=True)
-    verdict = harness.prove_question(
-        kubiq, _target(tmp_path), "ckad-mock-7", 0, _drill(), "ns"
-    )
+    verdict = _prove_one(FakeKubiq(passes_unsolved=True), tmp_path)
     assert verdict.negative_control_ok is False
     assert verdict.passed is True
     assert verdict.proven is False
@@ -260,8 +305,7 @@ def test_heredoc_in_the_solution_reaches_the_shell_intact(
     tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
 ) -> None:
     kubiq = FakeKubiq()
-    drill = _drill(solution=SOLUTION_WITH_HEREDOC)
-    harness.prove_question(kubiq, _target(tmp_path), "ckad-mock-7", 0, drill, "ns")
+    _prove_one(kubiq, tmp_path, _drill(solution=SOLUTION_WITH_HEREDOC))
     script, _ = kubiq.scripts[0]
     assert "# create the pod" not in script
     assert "# indented comment" not in script
@@ -284,8 +328,8 @@ class _SlowKubiq(FakeKubiq):
         self.passes_on = passes_on
         self.graded_after_solve = 0
 
-    def check(self, sid: str, question: int) -> dict[str, Any]:
-        report = super().check(sid, question)
+    def grade(self, sid: str, question: int) -> dict[str, Any]:
+        report = super().grade(sid, question)
         if question in self.solved:
             self.graded_after_solve += 1
             if self.graded_after_solve < self.passes_on:
@@ -296,10 +340,7 @@ class _SlowKubiq(FakeKubiq):
 def test_grading_is_polled_until_the_cluster_converges(
     tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
 ) -> None:
-    kubiq = _SlowKubiq(passes_on=3)
-    verdict = harness.prove_question(
-        kubiq, _target(tmp_path), "ckad-mock-7", 0, _drill(), "ns"
-    )
+    verdict = _prove_one(_SlowKubiq(passes_on=3), tmp_path)
     assert verdict.passed is True
     assert no_sleep == [harness.SETTLE_POLL, harness.SETTLE_POLL]
 
@@ -312,20 +353,37 @@ def test_grading_stops_at_the_settle_cap(
 ) -> None:
     monkeypatch.setenv("KUBIQ_SETTLE_SECONDS", "0")
     kubiq = _SlowKubiq(passes_on=99)
-    verdict = harness.prove_question(
-        kubiq, _target(tmp_path), "ckad-mock-7", 0, _drill(), "ns"
-    )
+    verdict = _prove_one(kubiq, tmp_path)
     assert verdict.passed is False
     assert no_sleep == [], "a zero cap grades exactly once"
     assert "finish" in [c[0] for c in kubiq.calls], "the exam is still ended"
 
 
+class _BrokenSolutionKubiq(_SlowKubiq):
+    """The reference solution exits non-zero; the grade would never converge."""
+
+    def shell_exec(
+        self, sid: str, cmd: str, namespace: str | None = None, timeout: float = 400
+    ) -> tuple[int, str, str]:
+        super().shell_exec(sid, cmd, namespace, timeout)
+        return 1, "", "error: the server doesn't have a resource type"
+
+
+def test_a_failed_solution_is_graded_once_not_polled(
+    tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
+) -> None:
+    kubiq = _BrokenSolutionKubiq(passes_on=99)
+    verdict = _prove_one(kubiq, tmp_path)
+    assert verdict.passed is False
+    assert verdict.exit_code == 1
+    assert no_sleep == [], "no settle polling after a non-zero solution exit"
+    assert kubiq.graded_after_solve == 1
+
+
 def test_verdict_json_carries_kind_and_the_fields_the_report_reads(
     tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
 ) -> None:
-    verdict = harness.prove_question(
-        FakeKubiq(), _target(tmp_path), "ckad-mock-7", 0, _drill(), "ns0"
-    )
+    verdict = _prove_one(FakeKubiq(), tmp_path)
     data = verdict.to_json()
     assert data["kind"] == "verdict"
     assert data["drill"] == "pod-basics"
@@ -335,10 +393,15 @@ def test_verdict_json_carries_kind_and_the_fields_the_report_reads(
     assert data["results"] == [
         {"name": "web runs nginx", "ok": True, "detail": "image nginx:alpine"}
     ]
+    assert data["results_before"] == [
+        {"name": "web runs nginx", "ok": False, "detail": 'pods "web" not found'}
+    ]
     assert data["leftovers"] == []
     assert data["namespace"] == "ns0"
     assert data["question"] == 0
     assert data["exit_code"] == 0
+    assert data["setup_settle_seconds"] == verdict.setup_settle_seconds
+    assert isinstance(data["setup_settle_seconds"], float)
 
 
 def test_leftovers_are_the_objects_teardown_did_not_remove(
@@ -356,13 +419,13 @@ def test_leftovers_are_the_objects_teardown_did_not_remove(
     monkeypatch.setattr(harness, "_run", fake)
 
     class Kubiq(FakeKubiq):
-        def create_session(self, exam_id: str) -> dict[str, Any]:
+        def create_session(
+            self, exam_id: str, questions: list[int] | None = None
+        ) -> dict[str, Any]:
             fake.session_created = True
-            return super().create_session(exam_id)
+            return super().create_session(exam_id, questions)
 
-    verdict = harness.prove_question(
-        Kubiq(), _target(tmp_path), "ckad-mock-7", 0, _drill(), "ns0"
-    )
+    verdict = _prove_one(Kubiq(), tmp_path)
     assert verdict.passed is True
     assert verdict.proven is False
     assert verdict.leftovers == [
@@ -387,13 +450,52 @@ def test_prove_exam_solves_everything_in_one_session(
     verdicts = harness.prove_exam(kubiq, _target(tmp_path), exam, drills)
     assert [c[0] for c in kubiq.calls].count("create") == 1
     assert [c[0] for c in kubiq.calls].count("finish") == 1
-    assert kubiq.calls[1] == ("create", "ckad-mock-7")
+    assert kubiq.calls[1] == ("create", ("ckad-mock-7", None)), "whole exam provisioned"
     assert [v.drill for v in verdicts] == ["pod-a", "pod-b"]
     assert [v.namespace for v in verdicts] == ["ns0", "ns1"]
     assert all(v.passed and v.negative_control_ok for v in verdicts)
     assert all(v.settle_seconds >= 0 for v in verdicts)
     assert no_sleep == []
     assert [s[1] for s in kubiq.scripts] == ["ns0", "ns1"]
+    assert kubectl.pod_queries() == ["ns0", "ns1"]
+
+
+def test_prove_exam_with_indexes_solves_only_those_in_index_order(
+    tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
+) -> None:
+    kubiq = FakeKubiq()
+    drills = [_drill("pod-a"), _drill("pod-b"), _drill("pod-c")]
+    exam = _exam(
+        [
+            Question("pod-a", 40, "ns0"),
+            Question("pod-b", 30, "ns1"),
+            Question("pod-c", 30, "ns2"),
+        ]
+    )
+    verdicts = harness.prove_exam(kubiq, _target(tmp_path, 3), exam, drills, [1])
+    assert [(v.drill, v.question, v.namespace) for v in verdicts] == [("pod-b", 1, "ns1")]
+    assert [c for c in kubiq.calls if c[0] == "grade"] == [("grade", 1), ("grade", 1)]
+    assert [s[1] for s in kubiq.scripts] == ["ns1"]
+    assert ("create", ("ckad-mock-7", [1])) in kubiq.calls, "only q2 provisioned"
+    assert kubectl.pod_queries() == ["ns1"]
+    assert [c[0] for c in kubiq.calls].count("create") == 1
+    assert "finish" in [c[0] for c in kubiq.calls]
+    assert "setup_settle_seconds" in verdicts[0].to_json()
+
+    kubiq = FakeKubiq()
+    verdicts = harness.prove_exam(kubiq, _target(tmp_path, 3), exam, drills, [2, 0, 2])
+    assert [v.question for v in verdicts] == [0, 2], "index order, no duplicates"
+    assert [s[1] for s in kubiq.scripts] == ["ns0", "ns2"]
+
+
+def test_prove_exam_refuses_an_index_the_exam_does_not_have(
+    tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
+) -> None:
+    kubiq = FakeKubiq()
+    exam = _exam([Question("pod-a", 100, "ns0")])
+    with pytest.raises(DrillError, match=r"\[1\] do not exist in a 1-question exam"):
+        harness.prove_exam(kubiq, _target(tmp_path, 1), exam, [_drill("pod-a")], [1])
+    assert kubiq.calls == [], "refused before any session"
 
 
 def test_prove_exam_names_a_drill_the_exam_lists_but_nobody_supplied(
@@ -475,3 +577,172 @@ def test_stage_exam_removes_a_drill_file_no_longer_listed(tmp_path: Path) -> Non
 
 def _digest(verdict: harness.Verdict) -> str:
     return digest_result(json.dumps(verdict.to_json()))
+
+
+def test_prove_exam_grades_each_question_in_its_own_namespace_not_at_finish(
+    tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
+) -> None:
+    """`finish` grades with the shell left in the last question's namespace, so
+    exec checks that rely on the current context fail there for reasons that
+    are not the drill's. The verdict must be the grade taken right after the
+    solution, in-namespace."""
+
+    class FinishLies(FakeKubiq):
+        def finish(self, sid: str, timeout: float = 600) -> dict[str, Any]:
+            report = super().finish(sid, timeout)
+            for q in report["questions"]:
+                q["passed"] = False
+                q["results"] = [{"name": "x", "ok": False, "detail": "not found"}]
+            return report
+
+    kubiq = FinishLies()
+    exam = _exam([Question("pod-a", 50, "ns0"), Question("pod-b", 50, "ns1")])
+    verdicts = harness.prove_exam(
+        kubiq, _target(tmp_path), exam, [_drill("pod-a"), _drill("pod-b")]
+    )
+    assert all(v.passed and v.proven for v in verdicts)
+    assert "finish" in [c[0] for c in kubiq.calls], "the exam is still ended"
+
+
+def _ticking_clock(monkeypatch: pytest.MonkeyPatch, step: float) -> None:
+    """`time.monotonic` advancing `step` seconds on every call."""
+    now = [0.0]
+
+    def monotonic() -> float:
+        now[0] += step
+        return now[0]
+
+    monkeypatch.setattr(harness.time, "monotonic", monotonic)
+
+
+def test_a_slow_solution_is_not_proven(
+    tmp_path: Path,
+    no_sleep: list[float],
+    kubectl: FakeKubectl,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Correct but slow is refused: the exam gives six minutes a question."""
+    _ticking_clock(monkeypatch, 100.0)
+    verdict = _prove_one(FakeKubiq(), tmp_path)
+    assert verdict.passed and verdict.solve_seconds >= 200
+    assert verdict.too_slow and not verdict.proven
+    monkeypatch.setenv("KUBIQ_SOLVE_BUDGET", "1000")
+    assert not verdict.too_slow and verdict.proven
+
+
+# --- the setup settle gate ---------------------------------------------------
+
+
+def _pod(
+    phase: str,
+    *,
+    waiting: str | None = None,
+    init_waiting: str | None = None,
+    unschedulable: bool = False,
+) -> dict[str, Any]:
+    def container(reason: str | None) -> dict[str, Any]:
+        state = {"waiting": {"reason": reason}} if reason else {"running": {}}
+        return {"name": "c", "state": state}
+
+    status: dict[str, Any] = {"phase": phase, "containerStatuses": [container(waiting)]}
+    if init_waiting:
+        status["initContainerStatuses"] = [container(init_waiting)]
+    if unschedulable:
+        status["conditions"] = [
+            {"type": "PodScheduled", "status": "False", "reason": "Unschedulable"}
+        ]
+    return {"metadata": {"name": "p"}, "status": status}
+
+
+def _pods_run(
+    monkeypatch: pytest.MonkeyPatch, answers: list[list[dict[str, Any]] | None]
+) -> list[list[str]]:
+    """`_run` answering `kubectl get pods` from `answers` in turn (None: kubectl
+    fails); the last answer repeats. Returns the argv log."""
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], *, timeout: float, **kw: Any) -> tuple[int, str, str]:
+        calls.append(argv)
+        answer = answers[min(len(calls), len(answers)) - 1]
+        if answer is None:
+            return 1, "", "error: namespace not found"
+        return 0, json.dumps({"items": answer}), ""
+
+    monkeypatch.setattr(harness, "_run", run)
+    return calls
+
+
+def test_settle_waits_while_a_container_is_still_creating(
+    no_sleep: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _pods_run(
+        monkeypatch,
+        [
+            [_pod("Pending", waiting="ContainerCreating")],
+            [_pod("Running", waiting="PodInitializing")],
+            [_pod("Pending", init_waiting="PodInitializing")],
+            [_pod("Running")],
+        ],
+    )
+    waited = harness.settle_setup("ckad03-job")
+    assert calls[0] == ["kubectl", "get", "pods", "-n", "ckad03-job", "-o", "json"]
+    assert len(calls) == 4
+    assert no_sleep == [harness.SETTLE_POLL] * 3
+    assert 0 <= waited <= harness.SETUP_SETTLE_MAX
+
+
+@pytest.mark.parametrize(
+    "pods",
+    [
+        [],
+        [_pod("Running")],
+        [_pod("Succeeded"), _pod("Failed")],
+        [_pod("Pending", unschedulable=True)],
+        [_pod("Pending", waiting="ImagePullBackOff")],
+        [_pod("Pending", waiting="ErrImagePull")],
+        [_pod("Pending", waiting="CreateContainerConfigError")],
+        [_pod("Pending", init_waiting="InvalidImageName")],
+        [_pod("Running", waiting="CrashLoopBackOff")],
+        [_pod("Running"), _pod("Pending", unschedulable=True)],
+    ],
+    ids=[
+        "no pods",
+        "running",
+        "terminal",
+        "unschedulable trap",
+        "image pull backoff",
+        "image pull error",
+        "config error",
+        "init image invalid",
+        "crash loop",
+        "mixed settled",
+    ],
+)
+def test_settle_is_immediate_when_nothing_is_still_being_created(
+    no_sleep: list[float], monkeypatch: pytest.MonkeyPatch, pods: list[dict[str, Any]]
+) -> None:
+    calls = _pods_run(monkeypatch, [pods])
+    waited = harness.settle_setup("ns")
+    assert len(calls) == 1
+    assert no_sleep == []
+    assert 0 <= waited < 1
+
+
+def test_settle_treats_a_failing_kubectl_as_settled(
+    no_sleep: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _pods_run(monkeypatch, [None])
+    assert harness.settle_setup("gone") >= 0
+    assert len(calls) == 1 and no_sleep == []
+
+
+def test_settle_gives_up_at_the_cap_without_raising(
+    no_sleep: list[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ticking_clock(monkeypatch, 10.0)
+    calls = _pods_run(monkeypatch, [[_pod("Pending")]])  # scheduled, kubelet silent
+    waited = harness.settle_setup("ckad05-slow")
+    assert waited == harness.SETUP_SETTLE_MAX
+    assert len(calls) >= 2 and len(no_sleep) == len(calls) - 1
+    calls = _pods_run(monkeypatch, [[_pod("Running", waiting="ContainerCreating")]])
+    assert harness.settle_setup("ckad05-slow", timeout=20.0) == 20.0

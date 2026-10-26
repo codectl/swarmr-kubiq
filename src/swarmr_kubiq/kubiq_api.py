@@ -1,11 +1,15 @@
-"""Talking to a running kubiq: its HTTP API, its candidate shell, its restart.
+"""Talking to a running kubiq: its HTTP API, its candidate shell, its reload.
 
 One responsibility: the transport. Nothing here knows what a drill is or what
 "proven" means; `harness` does. The client wraps the session endpoints kubiq
 exposes to its browser UI, `shell_exec` reaches the candidate's shell the way
-the grader does (`kubectl exec` into `cand-<session>`), and `restart_server`
-reloads the checkout because kubiq reads drills and exams from disk only at
-startup.
+the grader does (`kubectl exec` into `cand-<session>`), `reload` makes kubiq
+re-read the bind-mounted checkout into its live catalogue and `check` asks the
+loader whether it would, without swapping anything.
+
+A server that is not there, lacks `/api/reload`, or has a session open that a
+reload would pull the catalogue from under is a `FatalError`: retrying cannot
+change any of those, and the tools stop cluster work on it.
 
 Every subprocess goes through the module-level `_run`, every pause through
 `_sleep`, so tests can fake both without a cluster or a clock.
@@ -22,9 +26,9 @@ import httpx
 
 __all__ = [
     "SESSIONS_NAMESPACE",
+    "FatalError",
     "KubiqClient",
     "KubiqError",
-    "restart_server",
     "run",
 ]
 
@@ -35,17 +39,32 @@ _POLL_SECONDS = 2.0
 _TERMINAL_STATES = ("ready", "failed")
 
 
+class FatalError(Exception):
+    """The run cannot continue and retrying will not change that.
+
+    Not a `KubiqError`: `guard` turns those into a `tool error:` the model may
+    retry. This one is re-raised as a plain tool error prefixed FATAL, and the
+    prompts say a FATAL result ends the proof.
+    """
+
+
 class KubiqError(Exception):
     """kubiq refused or failed; the message carries the server's own text."""
 
 
 def run(
-    argv: list[str], *, timeout: float, cwd: Path | None = None
+    argv: list[str], *, timeout: float, cwd: Path | None = None, stdin: str | None = None
 ) -> tuple[int, str, str]:
     """Run a command to completion; a timeout is reported as exit 124, not raised."""
     try:
         done = subprocess.run(
-            argv, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
+            argv,
+            cwd=cwd,
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
         )
     except FileNotFoundError as exc:
         raise KubiqError(f"`{argv[0]}` is not on PATH") from exc
@@ -67,12 +86,61 @@ class KubiqClient:
         self.base_url = base_url.rstrip("/")
         self._http = httpx.Client(base_url=self.base_url, timeout=timeout)
 
-    def _call(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        response = self._http.request(method, path, **kwargs)
-        if response.is_error:
+    def _call(
+        self, method: str, path: str, *, allow: tuple[int, ...] = (), **kwargs: Any
+    ) -> httpx.Response:
+        """One request; an error status not in `allow` is a `KubiqError`."""
+        try:
+            response = self._http.request(method, path, **kwargs)
+        except httpx.TransportError as exc:
+            raise FatalError(
+                f"kubiq is not running at {self.base_url}; start it with docker "
+                "compose up -d in the kubiq checkout. Do not retry."
+            ) from exc
+        if response.is_error and response.status_code not in allow:
             body = response.text.strip() or "no body"
             raise KubiqError(f"kubiq {response.status_code} on {method} {path}: {body}")
         return response
+
+    def reload(self) -> dict[str, Any]:
+        """Re-read `drills/` and `exams/` from disk into the live catalogue.
+
+        Returns kubiq's `{"drills": n, "exams": n}`. A loader refusal (422) is a
+        `KubiqError` carrying the loader's own text and leaves the old catalogue
+        in place. A session open on the server (409) or a server without the
+        endpoint (404) is a `FatalError`.
+        """
+        response = self._call("POST", "/api/reload", allow=(404, 409, 422))
+        if response.status_code == 404:
+            raise FatalError(self._no_endpoint("/api/reload"))
+        if response.status_code == 409:
+            raise FatalError(
+                f"another session is open on kubiq at {self.base_url}; a reload would "
+                "change the catalogue under it. Proofs cannot run until it is "
+                "finished. Do not retry."
+            )
+        if response.status_code == 422:
+            raise KubiqError(_error_text(response))
+        return response.json()
+
+    def check(self) -> str:
+        """Ask the loader whether the checkout loads; "" when it does, else its text.
+
+        Never swaps the catalogue, so it is allowed while a session runs.
+        """
+        response = self._call("POST", "/api/check", allow=(404, 422))
+        if response.status_code == 404:
+            raise FatalError(self._no_endpoint("/api/check"))
+        if response.status_code == 422:
+            return _error_text(response)
+        return ""
+
+    def _no_endpoint(self, path: str) -> str:
+        return (
+            f"kubiq at {self.base_url} has no {path}: rebuild it from a checkout with "
+            "hot reload (docker compose up -d --build in the kubiq checkout). "
+            "Do not retry."
+        )
 
     def exams(self) -> list[dict[str, Any]]:
         return self._call("GET", "/api/exams").json()
@@ -83,8 +151,15 @@ class KubiqClient:
     def session(self, sid: str) -> dict[str, Any]:
         return self._call("GET", f"/api/sessions/{sid}").json()
 
-    def create_session(self, exam_id: str) -> dict[str, Any]:
-        return self._call("POST", "/api/sessions", json={"exam_id": exam_id}).json()
+    def create_session(
+        self, exam_id: str, questions: list[int] | None = None
+    ) -> dict[str, Any]:
+        """Open a session; with `questions` (0-based indexes) kubiq provisions
+        only those questions' namespaces and files."""
+        body: dict[str, Any] = {"exam_id": exam_id}
+        if questions is not None:
+            body["questions"] = questions
+        return self._call("POST", "/api/sessions", json=body).json()
 
     def wait_ready(self, sid: str, timeout: float = 300) -> dict[str, Any]:
         """Poll until the shell and the question namespaces exist.
@@ -106,7 +181,7 @@ class KubiqClient:
             raise KubiqError(f"session {sid} failed to provision: {message}")
         return view
 
-    def check(self, sid: str, question: int) -> dict[str, Any]:
+    def grade(self, sid: str, question: int) -> dict[str, Any]:
         """Grade one question now: {passed, results: [{name, ok, detail}]}."""
         return self._call(
             "POST", f"/api/sessions/{sid}/check", params={"question": question}
@@ -167,71 +242,10 @@ class KubiqClient:
         return _run(argv, timeout=timeout)
 
 
-def restart_server(
-    checkout: Path,
-    client: KubiqClient,
-    exam_id: str,
-    questions: int,
-    timeout: float = 600,
-) -> dict[str, Any]:
-    """Rebuild and recreate the kubiq container so it reloads the checkout.
-
-    Returns the `/api/exams` entry once the server answers and lists `exam_id`
-    with `questions` questions. Anything else — compose failing, the server
-    never coming up, the exam missing or short — raises with the tail of the
-    compose logs, which is where kubiq prints the drill it refused.
-
-    Refuses while any session exists: a recreate kills it, and the server has
-    one slot that a person may be sitting an exam in. The caller closes its own
-    sessions first; whatever remains is not ours to end.
-    """
+def _error_text(response: httpx.Response) -> str:
+    """kubiq's `{"error": ...}` body as text; the raw body when it is not JSON."""
     try:
-        open_sessions = client.sessions()
-    except (httpx.HTTPError, KubiqError):
-        open_sessions = []  # server down: nothing to protect, restart is the fix
-    if open_sessions:
-        ids = ", ".join(str(s.get("id", "?")) for s in open_sessions)
-        raise KubiqError(
-            f"not restarting kubiq: session(s) {ids} are open on {client.base_url} "
-            "and a restart would end them. Wait for the exam to finish."
-        )
-    rc, _, err = _run(
-        ["docker", "compose", "up", "-d", "--build", "--force-recreate"],
-        timeout=timeout,
-        cwd=checkout,
-    )
-    if rc != 0:
-        tail = err.strip()[-600:]
-        logs = _compose_logs(checkout)
-        raise KubiqError(f"docker compose up exited {rc}: {tail}\n{logs}")
-    deadline = time.monotonic() + timeout
-    seen = "no answer yet"
-    while time.monotonic() < deadline:
-        try:
-            exams = client.exams()
-        except (httpx.HTTPError, KubiqError) as exc:
-            seen = f"{type(exc).__name__}: {exc}"
-        else:
-            entry = next((e for e in exams if e.get("id") == exam_id), None)
-            if entry is None:
-                seen = f"exam {exam_id!r} not listed"
-            elif entry.get("questions") != questions:
-                seen = f"exam {exam_id!r} lists {entry.get('questions')} questions"
-            else:
-                return entry
-        _sleep(_POLL_SECONDS)
-    raise KubiqError(
-        f"kubiq did not come back with {exam_id!r} ({questions} questions) within "
-        f"{timeout:g}s; last seen: {seen}\n{_compose_logs(checkout)}"
-    )
-
-
-def _compose_logs(checkout: Path) -> str:
-    rc, out, err = _run(
-        ["docker", "compose", "logs", "--no-color", "--tail", "20"],
-        timeout=60,
-        cwd=checkout,
-    )
-    text = out if rc == 0 else err
-    lines = text.strip().splitlines()[-20:]
-    return "docker compose logs (last 20 lines):\n" + "\n".join(lines)
+        error = response.json().get("error")
+    except (ValueError, AttributeError):
+        error = None
+    return str(error) if error else response.text.strip() or "no body"
