@@ -1,11 +1,11 @@
 """Exam-authoring team: a Kubernetes mock exam for kubiq, every question proven.
 
-A commander plans the slots, an author writes one question at a time, a
-tester proves each one on a live kubiq session — negative control, the
+A commander plans the slots, an author writes one question at a time, the
+commander proves them all in one live kubiq session — negative control, each
 drill's own solution, grading, teardown — and a critic independently tries to
 refute every proven question before it is filed. Input is an exam id and a
 certification; output is the exam written into the kubiq checkout, with a
-per-question verdict and the branch to open a pull request from.
+per-question verdict and the commands to open a pull request.
 
 The team declares itself here. Deleting this package and its tests removes it
 completely: discovery is by entry point, so nothing else in the tree refers to
@@ -39,15 +39,15 @@ TEAM = Team(
         "plans the slots against the official curriculum shares with the real "
         "exam's weights, then for each question an author designs a drill in the "
         "official exam voice and checks it for novelty against the whole "
-        "catalogue, a tester proves it in a fresh session — the grader must fail "
+        "catalogue, the harness proves it in a live session — the grader must fail "
         "on the untouched namespace, pass after the drill's own solution, and "
         "leave nothing behind — and a critic independently tries to refute it: "
         "too-permissive checks, a task that changed after a fix, a repeat of an "
-        "existing question. Use for 'write ckad-mock-7', 'add a CKS mock with 16 "
+        "existing question. Use for 'write ckad-mock-7', 'add a CKS mock with 19 "
         "questions', 'author an exam that covers the 1.34 features', 'generate "
         "more questions in the domains the catalogue lacks', and 'prove this "
         "draft exam before I open the PR'. Writes the exam and its drills into "
-        "the checkout and restarts the kubiq server to load them; needs kubectl "
+        "the checkout and has the kubiq server reload them; needs kubectl "
         "access to the cluster kubiq runs on. Files only questions the critic "
         "confirmed; a slot that could not be proven is reported as dropped, never "
         "filled with an unproven question."
@@ -63,10 +63,9 @@ TEAM = Team(
     is_error=is_tool_error,
     render_report=Lazy(f"{_MODULE}.report_tool:render_report_args"),
     members=(
-        Member("commander", "plans the slots; holds no authoring or cluster tools"),
+        Member("commander", "plans the slots, proves them on kubiq, files the exam"),
         Member("author", "designs one question, checks novelty, stages it"),
-        Member("tester", "proves one question in a live kubiq session"),
-        Member("critic", "independently tries to refute a proven question"),
+        Member("critic", "independently tries to refute a batch of proven questions"),
     ),
     prompt_hint="CKAD, 21 questions, include two questions on Kubernetes 1.33 features",
 )

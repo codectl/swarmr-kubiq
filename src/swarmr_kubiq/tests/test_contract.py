@@ -19,16 +19,11 @@ from swarmr.teams import names as registered_names
 from swarmr_kubiq import TEAM
 from swarmr_kubiq.agent import _BRIEFED, _EVIDENCE_ONLY, _NO_WRITES
 from swarmr_kubiq.digest import digest_result, is_tool_error
-from swarmr_kubiq.tools import (
-    AUTHOR_TOOLS,
-    COMMANDER_TOOLS,
-    CRITIC_TOOLS,
-    TESTER_TOOLS,
-)
+from swarmr_kubiq.tools import AUTHOR_TOOLS, COMMANDER_TOOLS, CRITIC_TOOLS
 
-_PROVING_TOOLS = {"prove_question", "shell"}
-_CLUSTER_TOOLS = _PROVING_TOOLS | {"negative_control"}
-_WRITING_TOOLS = {"stage_drill"}
+_PROVING_TOOLS = {"prove_all", "prove_questions"}
+_WRITING_TOOLS = {"stage_drill", "plan_exam", "finalize_exam"}
+_DOCS_TOOLS = {"search_docs", "read_doc"}
 
 
 def _names(tools: list[BaseTool]) -> set[str]:
@@ -46,7 +41,7 @@ class TestVocabulary:
 
     def test_roster_names_the_specialists(self) -> None:
         names = {member.name for member in TEAM.members}
-        assert names == {"commander", "author", "tester", "critic"}
+        assert names == {"commander", "author", "critic"}
         assert TEAM.roster().count("\n") == len(TEAM.members) - 1
 
     def test_params_name_the_checkout_and_the_exam(self) -> None:
@@ -75,69 +70,87 @@ class TestVocabulary:
 
 
 class TestToolSets:
-    def test_only_the_tester_proves_and_has_a_shell(self) -> None:
-        assert _names(TESTER_TOOLS) >= _PROVING_TOOLS
-        for tools in (AUTHOR_TOOLS, CRITIC_TOOLS, COMMANDER_TOOLS):
-            assert not _names(tools) & _PROVING_TOOLS
+    def test_the_author_designs_stages_and_proves_its_own_fix(self) -> None:
+        """A proof is a harness run with a deterministic result, so the author
+        re-proves a fix itself instead of a round trip through the commander."""
+        assert _names(AUTHOR_TOOLS) == {
+            "catalogue_search",
+            "read_drill",
+            "search_docs",
+            "read_doc",
+            "stage_drill",
+            "prove_questions",
+            "grader_details",
+        }
 
-    def test_the_critic_grades_the_untouched_namespace_itself(self) -> None:
-        assert {"negative_control", "diff_task"} <= _names(CRITIC_TOOLS)
-        assert not _names(CRITIC_TOOLS) & _WRITING_TOOLS
+    def test_the_critic_reads_verdicts_drills_and_docs_and_holds_no_cluster_tool(
+        self,
+    ) -> None:
+        """The harness records the untouched grade (`results_before`) during the
+        proof; the critic reads it rather than opening a session of its own."""
+        assert _names(CRITIC_TOOLS) == {
+            "grader_details",
+            "read_drill",
+            "catalogue_search",
+            "search_docs",
+            "read_doc",
+        }
+        assert not _names(CRITIC_TOOLS) & (_PROVING_TOOLS | _WRITING_TOOLS)
+
+    def test_the_commander_plans_proves_finalises_and_reports_but_cannot_author(
+        self,
+    ) -> None:
+        assert _names(COMMANDER_TOOLS) == {
+            TEAM.report_tool,
+            "plan_exam",
+            "prove_all",
+            "prove_questions",
+            "grader_details",
+            "finalize_exam",
+        }
+        assert "stage_drill" not in _names(COMMANDER_TOOLS)
 
     def test_author_and_critic_both_read_the_upstream_docs(self) -> None:
         """The author grounds a feature question in the docs; the critic must be
         able to check that grounding with the same source, not take it on trust."""
         for tools in (AUTHOR_TOOLS, CRITIC_TOOLS):
-            assert {"search_docs", "read_doc"} <= _names(tools)
-
-    def test_the_author_stages_but_never_touches_the_cluster(self) -> None:
-        names = _names(AUTHOR_TOOLS)
-        assert names >= _WRITING_TOOLS
-        assert names >= {"similar_drills", "validate_drill_yaml", "search_docs"}
-        assert not names & _CLUSTER_TOOLS
-
-    def test_the_commander_finalises_and_reports_but_cannot_author_or_prove(
-        self,
-    ) -> None:
-        assert _names(COMMANDER_TOOLS) == {TEAM.report_tool, "finalize_exam"}
-        assert not _names(COMMANDER_TOOLS) & (_WRITING_TOOLS | _CLUSTER_TOOLS)
+            assert _names(tools) >= _DOCS_TOOLS
 
     def test_every_specialist_is_briefed_by_the_commander(self) -> None:
         """Nobody starts from the caller's request: the author needs a slot, the
-        tester and the critic a question number."""
+        critic question numbers."""
         roster = {member.name for member in TEAM.members} - {TEAM.orchestrator}
         assert set(_BRIEFED) == roster
         assert set(TEAM.audit_agents) <= set(_BRIEFED)
 
-    def test_no_tool_takes_a_path_or_a_url_to_the_server(self) -> None:
-        """Tools take ids, numbers and text; the checkout and the server come
-        from the activated target, so a model cannot point one elsewhere."""
-        for tools in (AUTHOR_TOOLS, TESTER_TOOLS, CRITIC_TOOLS):
+    def test_no_tool_takes_a_path_a_command_or_a_url_to_the_server(self) -> None:
+        """Tools take ids, numbers, slots and text; the checkout and the server
+        come from the activated target, so a model cannot point one elsewhere,
+        and nothing runs a command of the model's choosing."""
+        for tools in (AUTHOR_TOOLS, CRITIC_TOOLS, COMMANDER_TOOLS):
             for t in tools:
+                if t.name == TEAM.report_tool:
+                    continue
                 fields = set(t.args)
-                assert not fields & {"path", "kubiq", "server", "checkout", "base_url"}, (
-                    t.name,
-                    fields,
-                )
+                assert not fields & {
+                    "path",
+                    "kubiq",
+                    "server",
+                    "checkout",
+                    "base_url",
+                    "command",
+                }, (t.name, fields)
                 assert fields <= {
                     "query",
                     "drill_id",
                     "url",
                     "drill_yaml",
                     "question_index",
-                    "namespace",
-                    "weight",
-                    "command",
+                    "question_indexes",
+                    "slots",
+                    "confirmed_questions",
+                    "summary",
                 }, (t.name, fields)
-
-    def test_the_shell_is_the_only_tool_taking_a_command(self) -> None:
-        with_command = {
-            t.name
-            for tools in (AUTHOR_TOOLS, TESTER_TOOLS, CRITIC_TOOLS)
-            for t in tools
-            if "command" in t.args
-        }
-        assert with_command == {"shell"}
 
 
 class TestPermissions:

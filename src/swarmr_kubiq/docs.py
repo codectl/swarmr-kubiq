@@ -17,6 +17,7 @@ import re
 import select
 import shlex
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -58,7 +59,11 @@ class DocsClient:
         client: httpx.Client | None = None,
         timeout: float = 30.0,
     ) -> None:
-        self.note = ""
+        # One subprocess pipe (or one MCP session) serves every specialist of
+        # the run, and they call concurrently: the lock keeps JSON-RPC frames
+        # whole, and `note` is per thread so a colleague's miss is not yours.
+        self._lock = threading.Lock()
+        self._local = threading.local()
         self.timeout = timeout
         self.url = url or os.environ.get("LODESTAR_URL")
         self._http = client
@@ -70,11 +75,27 @@ class DocsClient:
         self._session: str | None = None
         self._next_id = 0
 
+    @property
+    def note(self) -> str:
+        """Why the last call from THIS thread returned nothing, or ""."""
+        return getattr(self._local, "note", "")
+
+    @note.setter
+    def note(self, value: str) -> None:
+        self._local.note = value
+
     # -- public ----------------------------------------------------------------
 
+    # lodestar also indexes Argo, Flux and Cilium; an exam question cites only
+    # kubernetes.io, and the other corpora cost the author calls on noise.
+    SOURCES = ("kubernetes",)
+
     def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
-        """Ranked passages: [{title, url, snippet, document_id}], or []."""
-        text = self._tool("search_docs", {"query": query, "limit": limit})
+        """Ranked kubernetes.io passages: [{title, url, snippet, document_id}], or []."""
+        text = self._tool(
+            "search_docs",
+            {"query": query, "limit": limit, "sources": list(self.SOURCES)},
+        )
         return _parse_hits(text) if text else []
 
     def page(
@@ -102,6 +123,10 @@ class DocsClient:
     # -- transport -------------------------------------------------------------
 
     def _tool(self, name: str, arguments: dict[str, Any]) -> str:
+        with self._lock:
+            return self._tool_locked(name, arguments)
+
+    def _tool_locked(self, name: str, arguments: dict[str, Any]) -> str:
         try:
             if self._session is None:
                 self._handshake()

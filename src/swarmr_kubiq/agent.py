@@ -13,7 +13,16 @@ authors any exam against any kubiq checkout.
 
 from __future__ import annotations
 
-from deepagents import FilesystemPermission, SubAgent, create_deep_agent
+from typing import Any
+
+from deepagents import (
+    FilesystemMiddleware,
+    FilesystemPermission,
+    SubAgent,
+    create_deep_agent,
+)
+from langchain.agents.middleware.types import AgentMiddleware
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from swarmr.core.attribution import Attribution
 from swarmr.core.middleware import AnnounceName, FirstRoundBriefing
@@ -27,8 +36,8 @@ from swarmr_kubiq.tools import (
     AUTHOR_TOOLS,
     COMMANDER_TOOLS,
     CRITIC_TOOLS,
-    TESTER_TOOLS,
     reset_staging,
+    resume_staging,
 )
 
 __all__ = ["build", "profile_target"]
@@ -49,12 +58,68 @@ _EVIDENCE_ONLY = [
 
 # Every specialist's briefing must pass through the harness untouched: the
 # author's carries the slot specification and, on a fix round, the grader
-# output; the tester's and the critic's carry a question number that the
-# caller's request does not contain. Nobody starts from the symptom alone.
-_BRIEFED = ("author", "tester", "critic")
+# output; the critic's carries question numbers that the caller's request does
+# not contain. Nobody starts from the symptom alone.
+_BRIEFED = ("author", "critic")
 
 
-def _subagents(model: ChatOpenAI, facts: str, attribution: Attribution) -> list[SubAgent]:
+# The specialists' scratch filesystem holds nothing: the catalogue comes from
+# catalogue_search/read_drill, drafts go straight to stage_drill. Every
+# `ls`/`glob`/`grep`/`write_file` a model tried was a wasted, denied turn, so
+# only `read_file` (which deepagents requires) stays visible. Same name as the
+# default filesystem middleware, so deepagents swaps it in and keeps the
+# per-role permissions.
+def _read_only_fs() -> Any:
+    return FilesystemMiddleware(tools=["read_file"])
+
+
+# Model turns a specialist may take per briefing before its tools are taken
+# away and it must report. A specialist that has not decided in this many
+# turns is looping (re-reading a page, re-searching the corpus), and a loop in
+# a subagent never returns to the commander: the run hangs. The author's
+# budget covers a design, two proofs and the fixes between them; the critic's
+# covers seven questions at ~3 calls each.
+_TURN_BUDGET = {"author": 40, "critic": 30}
+
+
+class TurnBudget(AgentMiddleware):
+    """Withdraw the tools after `limit` model turns so the specialist answers.
+
+    Stateless: the turns taken are the AI messages already in the request, so
+    concurrent specialists of the same role never share a counter.
+    """
+
+    def __init__(self, agent_name: str, limit: int) -> None:
+        super().__init__()
+        self.agent_name = agent_name
+        self.limit = limit
+
+    @property
+    def name(self) -> str:
+        return f"TurnBudget[{self.agent_name}]"
+
+    def wrap_model_call(self, request: Any, handler: Any) -> Any:
+        turns = sum(isinstance(m, AIMessage) for m in request.messages)
+        if turns < self.limit:
+            return handler(request)
+        notice = (
+            f"\n\nTURN BUDGET EXHAUSTED ({self.limit} turns). Your tools are "
+            "withdrawn. Report NOW in the required format from what you already "
+            "observed; anything undecided is reported as such (an author reports "
+            "RESULT: FAILED with the last grader lines, a critic rules `unproven` "
+            "with the gap named). Do not apologise, do not plan further work."
+        )
+        base = request.system_message.content if request.system_message else ""
+        return handler(
+            request.override(
+                tools=[], system_message=SystemMessage(content=f"{base}{notice}")
+            )
+        )
+
+
+def _subagents(
+    model: ChatOpenAI, facts: dict[str, str], attribution: Attribution
+) -> list[SubAgent]:
     """The three specialists.
 
     Each `description` is what the commander reads when routing, so it names
@@ -65,47 +130,44 @@ def _subagents(model: ChatOpenAI, facts: str, attribution: Attribution) -> list[
             "name": "author",
             "description": (
                 "Designs one question from a slot specification — question "
-                "number, curriculum domain, weight, namespace, and a Kubernetes "
-                "version when the slot must cover a recent feature — checks it "
-                "for novelty against the catalogue, and stages it into the exam "
-                "under construction. On a fix round, send the same question "
-                "number with the tester's grader lines quoted verbatim; it may "
-                "change solution, checks or setup, never the task."
+                "number, curriculum domain and competency, namespace, and a "
+                "Kubernetes version when the slot must cover a recent feature — "
+                "checks it for novelty against the catalogue, and stages it into "
+                "the exam under construction (weight and namespace come from the "
+                "plan). On a fix round, send the same question number with the "
+                "grader's failing lines quoted verbatim; it may change solution, "
+                "checks or setup, never the task, and it proves its own fix with "
+                "prove_questions, returning PROVEN or FAILED with the grader lines."
             ),
-            "system_prompt": prompts.author(facts),
-            "middleware": [AnnounceName("author", attribution)],
+            "system_prompt": prompts.author(facts["author"]),
+            "middleware": [
+                _read_only_fs(),
+                AnnounceName("author", attribution),
+                TurnBudget("author", _TURN_BUDGET["author"]),
+            ],
             "tools": AUTHOR_TOOLS,
-            "model": model,
-            "permissions": _EVIDENCE_ONLY,
-        },
-        {
-            "name": "tester",
-            "description": (
-                "Proves one staged question on the live kubiq server: negative "
-                "control, the drill's own solution, grading, teardown proof. "
-                "Send the question number ONLY. Reports the grader's checks "
-                "verbatim; one tester at a time, because the server allows one "
-                "session."
-            ),
-            "system_prompt": prompts.tester(facts),
-            "middleware": [AnnounceName("tester", attribution)],
-            "tools": TESTER_TOOLS,
             "model": model,
             "permissions": _EVIDENCE_ONLY,
         },
         {
             "name": "critic",
             "description": (
-                "Adjudicates a proven question by trying to refute it: grades "
-                "the untouched namespace itself, compares the task text with its "
-                "first staging, reads the checks against the task, and scores "
-                "the catalogue for a repeat. Send ONLY the question number and "
-                "the author's one-line mechanic claim, never the tester's output. "
-                "Returns RULING: confirmed | refuted | unproven. Must run for "
-                "every question before it is filed."
+                "Adjudicates a BATCH of proven questions (send 5 to 7 numbers) by "
+                "trying to refute each from the recorded verdict: every check "
+                "must fail untouched and pass after the solution within budget, "
+                "the checks must grade the task as written, the cited docs must "
+                "say what the drill claims, the slot must fit the curriculum. It "
+                "holds no cluster tool. Send ONLY the question numbers, never "
+                "grader output. Returns one RULING per question: confirmed | "
+                "refuted | unproven. Every question needs a ruling before it is "
+                "filed."
             ),
-            "system_prompt": prompts.critic(facts),
-            "middleware": [AnnounceName("critic", attribution)],
+            "system_prompt": prompts.critic(facts["critic"]),
+            "middleware": [
+                _read_only_fs(),
+                AnnounceName("critic", attribution),
+                TurnBudget("critic", _TURN_BUDGET["critic"]),
+            ],
             "tools": CRITIC_TOOLS,
             "model": model,
             # The critic reports a ruling; it has nothing to persist.
@@ -134,24 +196,29 @@ def build(run: RunContext) -> TeamBuild:
     """
     target = activate(dict(run.params))
     reset_staging()
+    resumed = resume_staging(target)
     model = build_model()
     catalogue = profile_catalogue(target)
-    facts = render_facts(catalogue, target)
+    facts = {
+        "author": render_facts(catalogue, target, resumed=resumed),
+        "critic": render_facts(catalogue, target, drills=False),
+    }
 
     graph = create_deep_agent(
         model=model,
-        # The commander holds no authoring or cluster tools on purpose: its
-        # context stays clean, and it cannot fabricate an observation it never
-        # received. The one tool it does hold files the final report.
+        # The commander holds no authoring tools: it cannot write a question
+        # itself. It does hold the proof tools, because a proof is a harness
+        # run with a deterministic result — no model needs to sit between
+        # "prove" and "verdict", and one fewer dispatch per question.
         tools=COMMANDER_TOOLS,
-        system_prompt=prompts.commander(facts),
+        system_prompt=prompts.commander(facts["author"]),
         subagents=_subagents(model, facts, run.attribution),
         # Planning belongs in write_todos, which the harness already provides.
         permissions=_NO_WRITES,
         # No specialist is briefed with the caller's request: the author needs
-        # the slot the commander planned, the tester and the critic need a
-        # question number. Rewriting any of them to the request would send the
-        # whole exam brief to a role that works one question at a time.
+        # the slot the commander planned, the critic a batch of question
+        # numbers. Rewriting either to the request would send the whole exam
+        # brief to a role that works one question at a time.
         middleware=[FirstRoundBriefing(exempt=_BRIEFED)],
     )
     return TeamBuild(graph=graph, banner=banner(catalogue, target))

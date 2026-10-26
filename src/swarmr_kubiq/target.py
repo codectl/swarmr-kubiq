@@ -61,14 +61,16 @@ PARAMS = (
     ),
     Param(
         "questions",
-        "How many questions the exam should have. Default 21 (CKAD/CKA) or 16 (CKS).",
+        "How many questions the exam should have. Default 21 (CKAD/CKA) or 19 (CKS), "
+        "the smallest counts whose weights from 1, 2, 4 and 8 can carry every "
+        "curriculum share exactly.",
         required=False,
     ),
 )
 
 _EXAM_ID = re.compile(r"^[a-z][a-z0-9-]{2,40}$")
 _VERSION = re.compile(r"^v?(\d+)\.(\d+)")
-_CERTS = {"CKAD": 21, "CKA": 21, "CKS": 16}
+_CERTS = {"CKAD": 21, "CKA": 21, "CKS": 19}
 
 
 class TargetError(TeamError):

@@ -73,8 +73,54 @@ class TestParseDrill:
 
     def test_check_needs_resource_or_exec(self) -> None:
         text = MINIMAL.replace("    resource: { kind: Pod, name: sample }\n", "")
-        with pytest.raises(DrillError, match="needs `resource` or `exec`"):
+        with pytest.raises(DrillError, match="exactly one of `resource`/`exec`"):
             parse_drill(text)
+
+    def test_grader_kinds_are_mirrored(self) -> None:
+        d = parse_drill(MINIMAL)
+        d.checks[0].resource = {"kind": "ValidatingAdmissionPolicy", "name": "x"}
+        with pytest.raises(DrillError, match="group/version/Kind/plural"):
+            validate_drill(d)
+        d.checks[0].resource["kind"] = (
+            "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy/"
+            "validatingadmissionpolicies/cluster"
+        )
+        validate_drill(d)
+
+    def test_setup_may_only_hold_kinds_kubiq_applies(self) -> None:
+        d = parse_drill(MINIMAL)
+        d.setup = "apiVersion: example.com/v1\nkind: AppView\nmetadata:\n  name: x\n"
+        with pytest.raises(DrillError, match=r"setup kind 'AppView'.*start hook"):
+            validate_drill(d)
+        d.setup = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
+        validate_drill(d)
+
+    def test_exec_command_parts_must_be_strings(self) -> None:
+        """An unquoted `grep 'INFO: serving'` becomes a YAML mapping; kubiq refuses."""
+        text = MINIMAL.split("checks:")[0] + (
+            "checks:\n  - name: c\n    exec:\n      shell: true\n      command:\n"
+            "        - bash\n        - -lc\n"
+            "        - kubectl logs x | grep -q 'INFO: serving'\n"
+            "    assert:\n      - { exit: 0 }\n"
+        )
+        with pytest.raises(DrillError, match=r"command\[2\] must be a string"):
+            parse_drill(text)
+
+    def test_assertions_need_a_predicate(self) -> None:
+        text = MINIMAL.replace("equals: Running", "")
+        with pytest.raises(DrillError, match="no predicate"):
+            parse_drill(text)
+
+    def test_kubiq_loader_rules_are_mirrored(self) -> None:
+        """What kubiq's `Drill::validate` refuses, we refuse before writing."""
+        d = parse_drill(MINIMAL)
+        d.docs = [{"label": "a", "url": "u"}, {"label": "b", "url": "v"}]
+        with pytest.raises(DrillError, match="at most one `docs`"):
+            validate_drill(d)
+        d = parse_drill(MINIMAL)
+        d.checks[0].resource = {"kind": "Pod"}
+        with pytest.raises(DrillError, match="needs `name` or `selector`"):
+            validate_drill(d)
 
     def test_unknown_assert_key_is_named(self) -> None:
         text = MINIMAL.replace("equals: Running", "equal: Running")
@@ -170,3 +216,165 @@ def test_drill_dataclass_images_dedup() -> None:
         checks=[Check("n", [{"exists": True}], resource={"kind": "Pod"})],
     )
     assert d.images() == ["nginx:1.17"]
+
+
+_SETUP_DEPLOYMENT = """\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay-web
+spec:
+  selector: {{ matchLabels: {{ app: relay }} }}
+  template:
+    metadata: {{ labels: {{ app: relay }} }}
+    spec:
+      containers: [{{ name: web, image: nginx:alpine }}]
+"""
+
+
+def test_manifest_kinds_and_setup_objects_read_every_source() -> None:
+    d = parse_drill(MINIMAL)
+    d.setup = _SETUP_DEPLOYMENT.format()
+    d.solution = (
+        "kubectl apply -f - <<'EOF'\napiVersion: admissionregistration.k8s.io/v1\n"
+        "kind: MutatingAdmissionPolicy\nmetadata:\n  name: x\nEOF\n"
+    )
+    d.checks.append(
+        Check(
+            name="policy",
+            resource={"kind": "policy/v1/PodDisruptionBudget/poddisruptionbudgets"},
+            assert_=[{"path": "spec.minAvailable", "equals": 1}],
+        )
+    )
+    assert d.manifest_kinds() == {
+        ("apps/v1", "Deployment"),
+        ("admissionregistration.k8s.io/v1", "MutatingAdmissionPolicy"),
+        ("policy/v1", "PodDisruptionBudget"),
+    }
+    assert d.setup_objects() == {"relay-web": "Deployment"}
+
+
+def test_strict_refuses_exec_into_a_controller_name() -> None:
+    d = parse_drill(MINIMAL)
+    d.setup = _SETUP_DEPLOYMENT.format()
+    d.checks.append(
+        Check(
+            name="env",
+            exec={"pod": "relay-web", "command": ["sh", "-c", "echo $X"]},
+            assert_=[{"exit": 0}],
+        )
+    )
+    validate_drill(d, "d")  # the loader accepts it; it would just never pass
+    with pytest.raises(DrillError, match="is the setup's Deployment, not a Pod"):
+        validate_drill(d, "d", strict=True)
+
+
+def test_strict_refuses_an_escaped_dot_in_a_path() -> None:
+    d = parse_drill(MINIMAL)
+    d.checks[0].assert_ = [{"path": r"data.mode\.conf", "contains": "live"}]
+    with pytest.raises(DrillError, match=r'\["mode\.…"\]'):
+        validate_drill(d, "d", strict=True)
+
+
+def test_strict_refuses_a_jsonpath_filter_in_a_path() -> None:
+    d = parse_drill(MINIMAL)
+    d.checks[0].assert_ = [
+        {"path": '[*].status.conditions[?(@.type=="Ready")].status', "equals": "True"}
+    ]
+    with pytest.raises(DrillError, match="JSONPath filter"):
+        validate_drill(d, "d", strict=True)
+
+
+@pytest.mark.parametrize(
+    "solution",
+    [
+        "# edit the manifest and apply it\n# kubectl apply -f pod.yaml\n",
+        "kubectl get pods\nkubectl describe pod sample\n",
+        "vim pod.yaml\n",
+    ],
+)
+def test_strict_refuses_a_solution_that_changes_nothing(solution: str) -> None:
+    d = parse_drill(MINIMAL)
+    d.solution = solution
+    validate_drill(d, "d")
+    with pytest.raises(DrillError, match="changes anything"):
+        validate_drill(d, "d", strict=True)
+
+
+@pytest.mark.parametrize(
+    "solution",
+    [
+        "kubectl patch deploy x -p '{}'\n",
+        "helm install web ./chart\n",
+        "kubectl get pod sample -o yaml > /root/pod.yaml\n",
+        "kubectl apply -f - <<'EOF'\napiVersion: v1\nkind: Pod\nEOF\n",
+    ],
+)
+def test_strict_accepts_a_solution_that_acts(solution: str) -> None:
+    d = parse_drill(MINIMAL)
+    d.solution = solution
+    validate_drill(d, "d", strict=True)
+
+
+_CRD = """\
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: databases.dbstack.example.com
+spec:
+  group: dbstack.example.com
+  names: {{ kind: Database, plural: databases }}
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema: {{ openAPIV3Schema: {{ type: object }} }}
+"""
+
+
+def test_kinds_declared_by_the_drills_own_crd_are_not_missing() -> None:
+    """A CRD question installs its API in setup; the cluster serves it only
+    then, so the served-kinds gate must exempt what the drill declares."""
+    d = parse_drill(MINIMAL)
+    d.setup = _CRD.format()
+    d.files = {
+        "/opt/student-node/start.d/x.sh": (
+            "kubectl apply -f - <<'EOF'\napiVersion: dbstack.example.com/v1alpha1\n"
+            "kind: Database\nmetadata:\n  name: primary\nEOF\n"
+        )
+    }
+    assert d.declared_kinds() == {("dbstack.example.com/v1alpha1", "Database")}
+    assert d.manifest_kinds() - d.declared_kinds() == {
+        ("apiextensions.k8s.io/v1", "CustomResourceDefinition")
+    }
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        "apiVersion: v1\nkind: Secret\nmetadata: {name: tls}\ntype: kubernetes.io/tls\n"
+        "stringData:\n  tls.crt: |\n    -----BEGIN CERTIFICATE-----\n    MIIB\n"
+        "  tls.key: |\n    -----BEGIN PRIVATE KEY-----\n    MIIEvQ\n",
+        "apiVersion: v1\nkind: Secret\nmetadata: {name: tls}\ndata:\n"
+        "  tls.key: " + "QUJD" * 20 + "\n",
+    ],
+)
+def test_strict_refuses_a_private_key_in_the_drill(setup: str) -> None:
+    d = parse_drill(MINIMAL)
+    d.setup = setup
+    validate_drill(d, "d")
+    with pytest.raises(DrillError, match="embeds a private key"):
+        validate_drill(d, "d", strict=True)
+
+
+def test_strict_allows_minting_the_key_in_a_hook() -> None:
+    d = parse_drill(MINIMAL)
+    d.files = {
+        "/opt/student-node/start.d/x.sh": (
+            "openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/k -out /tmp/c "
+            "-subj /CN=x -days 1\n"
+            "kubectl create secret tls t --key /tmp/k --cert /tmp/c\n"
+        )
+    }
+    validate_drill(d, "d", strict=True)

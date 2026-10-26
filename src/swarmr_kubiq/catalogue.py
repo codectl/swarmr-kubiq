@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import Any
 
 from swarmr_kubiq.drill import Drill, DrillError, Exam, load_drill, load_exam
 from swarmr_kubiq.kubiq_api import run
@@ -30,12 +31,6 @@ __all__ = [
 ]
 
 # The real exams' curricula, verbatim from github.com/cncf/curriculum
-# (CKAD_Curriculum_v1.37.pdf, CKA_Curriculum_v1.35.pdf,
-# CKS_Curriculum v1.34.pdf):
-# CKS_Curriculum v1.34.pdf): domain → (percent, competencies).
-# the percentages; the author and the critic hold a question to the competency
-# list, so a CKAD exam never asks for cluster administration and a CKA exam
-# never reduces to application packaging.
 CURRICULUM: dict[str, dict[str, tuple[int, tuple[str, ...]]]] = {
     "CKAD": {
         "Application Design and Build": (
@@ -323,8 +318,21 @@ def profile_catalogue(target: Target | None = None) -> Catalogue:
     return cat
 
 
-def render_facts(cat: Catalogue, target: Target | None = None) -> str:
-    """The facts block injected into every prompt."""
+def render_facts(
+    cat: Catalogue,
+    target: Target | None = None,
+    *,
+    curriculum: bool = True,
+    drills: bool = True,
+    resumed: list[dict[str, Any]] | None = None,
+) -> str:
+    """The facts block injected into a prompt.
+
+    The drill list is ~3k tokens and the curriculum ~1k, paid on every
+    dispatch, so each role gets only what it uses: the author both (de-dup
+    and scope), the commander both (planning), the critic the curriculum (it
+    de-dups with `similar_drills`, which is exact), the tester neither.
+    """
     t = target or current()
     lines = [
         "<facts>",
@@ -340,14 +348,45 @@ def render_facts(cat: Catalogue, target: Target | None = None) -> str:
         "competencies it covers. Every question must exercise one of these "
         "competencies; nothing outside this list belongs in the exam.",
     ]
-    for dom, (pct, skills) in CURRICULUM.get(t.certification, {}).items():
-        have = cat.domain_counts(t.certification).get(dom, 0)
-        lines.append(f"  - {dom}: {pct}%  (existing drills in this domain: {have})")
-        lines.extend(f"      * {skill}" for skill in skills)
-    lines.append("")
-    lines.append("Existing drills (id · topic · title) — an exam must not repeat these:")
-    for d in sorted(cat.drills, key=lambda d: (d.exam, d.order)):
-        lines.append(f"  - {d.id} · {d.topic} · {d.title}")
+    if curriculum:
+        for dom, (pct, skills) in CURRICULUM.get(t.certification, {}).items():
+            have = cat.domain_counts(t.certification).get(dom, 0)
+            lines.append(f"  - {dom}: {pct}%  (existing drills in this domain: {have})")
+            lines.extend(f"      * {skill}" for skill in skills)
+    else:
+        del lines[-2:]
+    if drills:
+        lines.append("")
+        lines.append(
+            "Existing drills (id · topic · title) — an exam must not repeat these:"
+        )
+        own = {q.drill for e in cat.exams if e.id == t.exam for q in e.questions}
+        for d in sorted(cat.drills, key=lambda d: (d.exam, d.order)):
+            if d.id not in own:  # this exam's own questions are staged, not "existing"
+                lines.append(f"  - {d.id} · {d.topic} · {d.title}")
+    if resumed:
+        lines.append("")
+        lines.append(
+            "RESUMED from an earlier run of this exam: these questions are already "
+            "staged at these numbers. Do not re-author them; plan the remaining "
+            "numbers around them, then prove and critique every question, resumed "
+            "ones included (no proof survives a restart)."
+        )
+        for r in resumed:
+            lines.append(
+                f"  - {r['question']}. {r['drill']} · {r['topic']} · {r['title']} "
+                f"· weight {r['weight']} · ns {r['namespace']}"
+            )
+        broken = [r for r in resumed if r.get("problem")]
+        if broken:
+            lines.append("")
+            lines.append(
+                "These resumed questions FAIL today's validation or the API server's "
+                "dry-run. Before any proof, dispatch author for each with the problem "
+                "quoted verbatim (one author per question, in one message):"
+            )
+            for r in broken:
+                lines.append(f"  - {r['question']}. {r['drill']}: {r['problem']}")
     if cat.broken:
         lines.append("")
         lines.append("Files kubiq would refuse to load (fix before adding more):")
