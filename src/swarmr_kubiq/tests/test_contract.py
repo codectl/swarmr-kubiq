@@ -106,6 +106,7 @@ class TestToolSets:
             "prove_all",
             "prove_questions",
             "grader_details",
+            "record_rulings",
             "finalize_exam",
         }
         assert "stage_drill" not in _names(COMMANDER_TOOLS)
@@ -149,6 +150,7 @@ class TestToolSets:
                     "question_indexes",
                     "slots",
                     "confirmed_questions",
+                    "rulings",
                     "summary",
                 }, (t.name, fields)
 

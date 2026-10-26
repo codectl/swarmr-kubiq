@@ -128,7 +128,7 @@ def _slots() -> list[dict[str, Any]]:
                     "question": n,
                     "domain": domain,
                     "competency": CURRICULUM["CKAD"][domain][1][0],
-                    "namespace": f"ckad{n:02d}-q",
+                    "topic": "q",
                 }
             )
     return slots
@@ -290,14 +290,23 @@ def test_plan_refuses_wrong_wording_numbers_and_namespaces(checkout: Path) -> No
     assert "competency 'Build container images' is not verbatim one of" in err
     assert "Define, build and modify container images" in err
 
+    # The namespace is composed from the topic; a given namespace is only
+    # accepted when it equals the composition, so a wrong number is refused.
     slots = _slots()
+    del slots[1]["topic"]
     slots[1]["namespace"] = "ckad01-two"
-    assert "carries number 01, must be 02" in _error(tools.plan_exam, slots=slots)
-    slots[1]["namespace"] = "ckad02-Two"
-    assert "must match ckad02-<word>" in _error(tools.plan_exam, slots=slots)
+    assert "the namespace becomes ckad02-<topic>" in _error(tools.plan_exam, slots=slots)
+    slots[1]["namespace"] = "ckad02-two"
+    slots[1]["topic"] = "other"
+    assert "does not match the composed 'ckad02-other'" in _error(
+        tools.plan_exam, slots=slots
+    )
+    del slots[1]["namespace"]
+    slots[1]["topic"] = "two words"
+    assert "`topic` must be one lowercase word" in _error(tools.plan_exam, slots=slots)
 
     slots = _slots()
-    slots[0]["namespace"] = "ckad01-pod"  # ckad-mock-1's
+    slots[0]["topic"] = "pod"  # composes ckad01-pod, ckad-mock-1's
     assert "belongs to another exam" in _error(tools.plan_exam, slots=slots)
 
     slots = _slots()
@@ -686,6 +695,60 @@ def test_resume_restores_a_proof_only_when_the_key_matches(
     assert "has not been proved" in _error(tools.grader_details, question_index=1)
 
 
+def test_rulings_persist_with_the_proof_and_gate_finalize(
+    planned: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ruling is recorded on the proof record by a validated tool; finalize
+    files only recorded `confirmed`; a rerun restores it; any edit drops it."""
+    from swarmr_kubiq.catalogue import profile_catalogue, render_facts
+
+    _fake_proofs(monkeypatch, {"cm-mode": False})
+    _call(tools.stage_drill, drill_yaml=_drill(), question_index=1)
+    _call(tools.stage_drill, drill_yaml=_configmap(), question_index=2)
+    _call(tools.prove_all)
+
+    # Validation: unknown ruling, unproven question, no rulings.
+    assert "not one of" in _error(tools.record_rulings, rulings={"1": "maybe"})
+    assert "no passing proof" in _error(tools.record_rulings, rulings={"2": "confirmed"})
+    assert "no rulings" in _error(tools.record_rulings, rulings={})
+    # finalize refuses a proven-but-unruled question.
+    assert "no `confirmed` ruling" in _error(
+        tools.finalize_exam, confirmed_questions=[1], summary="s"
+    )
+    rec = _call(tools.record_rulings, rulings={"1": "Confirmed"})
+    assert rec["confirmed"] == [1]
+    assert _call(tools.grader_details, question_index=1)["ruling"] == "confirmed"
+
+    # A rerun restores the ruling and the facts say so; nothing to prove or judge.
+    tools.reset_staging()
+    resumed = tools.resume_staging(current())
+    assert [(r["question"], r["ruling"]) for r in resumed] == [(1, "confirmed"), (2, "")]
+    facts = render_facts(profile_catalogue(), resumed=resumed)
+    assert "1. pod-runs-nginx" in facts and "· CONFIRMED" in facts
+    assert _call(tools.prove_all)["skipped"] == [1]
+    done = _call(tools.finalize_exam, confirmed_questions=[1], summary="s")
+    assert done["filed"] == [1] and done["dropped"] == [2]
+
+    # The drill changed under the record: proof and ruling are both gone.
+    drill_file = planned / "drills/ckad-mock-7/q01-pod-runs-nginx.yaml"
+    drill_file.write_text(drill_file.read_text().replace("nginx:alpine", "nginx:1.27"))
+    tools.reset_staging()
+    resumed = tools.resume_staging(current())
+    assert (resumed[0]["proven"], resumed[0]["ruling"]) == (False, "")
+
+
+def test_resume_tolerates_a_corrupt_proof_cache(
+    planned: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_proofs(monkeypatch)
+    _call(tools.stage_drill, drill_yaml=_drill(), question_index=1)
+    _call(tools.prove_all)
+    proofs.cache_path(current()).write_text("{not json")
+    tools.reset_staging()
+    resumed = tools.resume_staging(current())
+    assert (resumed[0]["proven"], resumed[0]["ruling"]) == (False, "")
+
+
 def test_resume_revalidates_with_todays_rules(
     planned: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -799,3 +862,36 @@ def test_stage_refuses_a_kind_the_cluster_does_not_serve(
     err = _error(tools.stage_drill, drill_yaml=policy, question_index=1)
     assert "does not serve admissionregistration.k8s.io/v1 MutatingAdmissionPolicy" in err
     _call(tools.stage_drill, drill_yaml=_configmap(), question_index=1)
+
+
+def test_parallel_authors_stage_without_corrupting_each_other(planned: Path) -> None:
+    """Four authors stage at once: every call returns its own path, and the
+    exam file ends with all four — the staging lock makes each call atomic."""
+    import concurrent.futures as cf
+    import contextvars
+
+    drills = {
+        1: _drill(),
+        2: _configmap(),
+        3: _configmap(id="cm-three", name="cfg3").replace("data.mode", "data.mode3"),
+        4: _drill(id="pod-four", name="four").replace(
+            "spec.containers[0].image", "spec.containers[0].name"
+        ),
+    }
+    with cf.ThreadPoolExecutor(max_workers=4) as pool:
+        # The run's target is a ContextVar; the harness propagates it to the
+        # threads subagents run on, the pool does not.
+        ctx = contextvars.copy_context()
+        results = list(
+            pool.map(
+                lambda item: ctx.copy().run(
+                    _call, tools.stage_drill, drill_yaml=item[1], question_index=item[0]
+                ),
+                drills.items(),
+            )
+        )
+    for (idx, _), result in zip(drills.items(), results, strict=True):
+        assert result["question"] == idx and Path(result["path"]).is_file()
+    assert sorted(tools._staged) == [1, 2, 3, 4]
+    exam = (planned / "exams" / "ckad-mock-7.yaml").read_text()
+    assert all(f"drill: {tools._staged[i].id}" in exam for i in (1, 2, 3, 4))

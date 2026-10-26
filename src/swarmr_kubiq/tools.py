@@ -72,6 +72,7 @@ __all__ = [
     "prove_questions",
     "read_doc",
     "read_drill",
+    "record_rulings",
     "reset_staging",
     "resume_staging",
     "search_docs",
@@ -83,6 +84,8 @@ _PASS_PERCENT = {"CKAD": 75, "CKA": 66, "CKS": 67}
 _DURATION_MINUTES = 120
 _WEIGHTS = (8, 4, 2, 1)
 _MOCK_NUMBER = re.compile(r"-(\d+)$")
+# A namespace topic word: `ckad07-bluegreen` is prefix + this.
+_TOPIC = re.compile(r"^[a-z][a-z0-9]{0,20}$")
 
 
 @dataclass(slots=True)
@@ -182,10 +185,11 @@ def resume_staging(target: Target) -> list[dict[str, Any]]:
             namespace=q.namespace,
         )
         _task_at_staging[idx] = (drill.id, drill.task)
-        proven = False
+        proven, ruling = False, ""
         if (verdict := known.get(proofs.proof_key(drill, q.namespace))) is not None:
             _verdicts[idx] = {**verdict, "question": idx, "resumed": True}
             proven = bool(verdict.get("proven"))
+            ruling = str(verdict.get("ruling") or "")
         # Re-check with today's rules: a drill staged by an older version may
         # carry what kubiq or the API server would refuse. Listed, not dropped:
         # the commander sends the exact problem to the author in one batch.
@@ -205,6 +209,7 @@ def resume_staging(target: Target) -> list[dict[str, Any]]:
                 "weight": q.weight,
                 "namespace": q.namespace,
                 "proven": proven,
+                "ruling": ruling,
                 "problem": problem,
             }
         )
@@ -273,10 +278,6 @@ def _span(values: list[int]) -> str:
     return ", ".join(f"{a}-{b}" if a != b else str(a) for a, b in runs)
 
 
-def _namespace_pattern(target: Target) -> re.Pattern[str]:
-    return re.compile(rf"^{target.certification.lower()}(\d\d)-[a-z][a-z0-9]*$")
-
-
 @tool(parse_docstring=True)
 @guard
 def plan_exam(slots: list[dict[str, Any]]) -> str:
@@ -293,11 +294,13 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
     Args:
         slots: One mapping per question with `question` (1-based number),
             `domain` (a curriculum domain, verbatim), `competency` (one of that
-            domain's competencies, verbatim), `namespace` (`<cert>NN-<word>`,
-            e.g. "ckad07-bluegreen", NN the question number), optional
-            `file_graded` (true when the cluster cannot host the competency and
-            the question is graded from files in the candidate's shell) and
-            `feature_version` (e.g. "1.35" for a recent-feature slot).
+            domain's competencies, verbatim), `topic` (ONE lowercase word for
+            the namespace, e.g. "bluegreen": the namespace is composed as
+            `<cert>NN-<topic>`, "ckad07-bluegreen", and must not be used by
+            another exam), optional `file_graded` (true when the cluster cannot
+            host the competency and the question is graded from files in the
+            candidate's shell) and `feature_version` (e.g. "1.35" for a
+            recent-feature slot).
     """
     target = current()
     curriculum = CURRICULUM[target.certification]
@@ -309,7 +312,6 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
     taken = cat.namespaces() - {
         q.namespace for e in cat.exams if e.id == target.exam for q in e.questions
     }
-    ns_pattern = _namespace_pattern(target)
     planned: dict[int, Slot] = {}
     seen_ns: dict[str, int] = {}
     for raw in slots:
@@ -335,18 +337,25 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
                 f"question {number}: competency {competency!r} is not verbatim one of "
                 f"{domain}'s: " + " | ".join(curriculum[domain][1])
             )
-        namespace = str(raw.get("namespace", "")).strip()
-        m = ns_pattern.match(namespace)
-        if m is None:
+        # The namespace is composed here, never trusted: the commander gives
+        # the topic word, the tool prefixes the certification and the question
+        # number. A full `namespace` is accepted only when it equals that.
+        prefix = f"{target.certification.lower()}{number:02d}-"
+        topic = str(raw.get("topic", "") or "").strip().lower()
+        given = str(raw.get("namespace", "") or "").strip().lower()
+        if not topic and given.startswith(prefix):
+            topic = given[len(prefix) :]
+        if not _TOPIC.match(topic):
             raise ValueError(
-                f"question {number}: namespace {namespace!r} must match "
-                f"{target.certification.lower()}{number:02d}-<word> "
-                "(lowercase letters and digits)"
+                f"question {number}: `topic` must be one lowercase word of letters "
+                f"and digits (the namespace becomes {prefix}<topic>), got "
+                f"{raw.get('topic', raw.get('namespace'))!r}"
             )
-        if int(m.group(1)) != number:
+        namespace = prefix + topic
+        if given and given != namespace:
             raise ValueError(
-                f"question {number}: namespace {namespace!r} carries number "
-                f"{m.group(1)}, must be {number:02d}"
+                f"question {number}: namespace {given!r} does not match the composed "
+                f"{namespace!r}; give `topic` only"
             )
         if namespace in seen_ns:
             raise ValueError(
@@ -816,6 +825,11 @@ def _refuse_unscoped_exec(drill: Drill, namespace: str) -> None:
             )
 
 
+# Staging mutates `_staged`, `_plan` and the exam file; four authors stage at
+# once, so the whole operation is one critical section.
+_staging_lock = threading.Lock()
+
+
 @tool(parse_docstring=True)
 @guard
 def stage_drill(drill_yaml: str, question_index: int) -> str:
@@ -835,6 +849,11 @@ def stage_drill(drill_yaml: str, question_index: int) -> str:
         drill_yaml: The complete drill as YAML text.
         question_index: The question number, 1-based, as the commander assigned.
     """
+    with _staging_lock:
+        return _stage_drill(drill_yaml, question_index)
+
+
+def _stage_drill(drill_yaml: str, question_index: int) -> str:
     idx = int(question_index)
     if idx < 1:
         raise ValueError("question_index must be 1 or more")
@@ -898,7 +917,9 @@ def stage_drill(drill_yaml: str, question_index: int) -> str:
     stale = previous is not None and proofs.proof_key(previous, slot.namespace) != key
     if stale:
         _verdicts.pop(idx, None)
-    filename = f"q{_api_index(idx) + 1:02d}-{drill.id}.yaml"
+    path = target.drill_dir / f"q{_api_index(idx) + 1:02d}-{drill.id}.yaml"
+    if path not in written or not path.is_file():
+        raise RuntimeError(f"staging wrote {written} but not the expected {path}")
     return emit(
         {
             "kind": "staged",
@@ -906,7 +927,7 @@ def stage_drill(drill_yaml: str, question_index: int) -> str:
             "id": drill.id,
             "namespace": slot.namespace,
             "weight": slot.weight,
-            "path": str(next(p for p in written if p.name == filename)),
+            "path": str(path),
             "exam_file": str(target.exam_file),
             "staged_questions": len(_staged),
             "planned_questions": target.questions,
@@ -932,6 +953,11 @@ def _summary(payload: dict[str, Any]) -> dict[str, Any]:
         out["why"] = (
             "negative control passed untouched"
             if not payload["negative_control_ok"]
+            else "checks pass on the untouched namespace: "
+            + ", ".join(permissive)
+            + " — each grades nothing; fold what it guards into a check that "
+            "also asserts something only the solution produces, or drop it"
+            if permissive and not failing
             else f"too slow: {payload['solve_seconds']:g}s from solution start to a "
             f"passing grade, budget {harness.solve_budget():g}s — redesign the "
             "question so its effect lands fast; do not add waits"
@@ -1082,6 +1108,54 @@ def grader_details(question_index: int) -> str:
     return emit(verdict)
 
 
+RULINGS = ("confirmed", "refuted", "unproven")
+
+
+@tool(parse_docstring=True)
+@guard
+def record_rulings(rulings: dict[str, str]) -> str:
+    """Record the critic's ruling per question on the proof record.
+
+    The ruling is stored on the question's persisted verdict, under the same
+    key as the proof (the drill text and namespace), so it survives a rerun
+    exactly as long as the proof does and dies with any edit to the drill.
+    finalize_exam files only questions whose record says `confirmed`; a rerun
+    on unchanged questions therefore needs no critic at all.
+
+    Args:
+        rulings: Question number (1-based, as a string key) to ruling, one of
+            `confirmed`, `refuted`, `unproven` — exactly as the critic ruled.
+    """
+    if not rulings:
+        raise ValueError("no rulings given")
+    target = current()
+    recorded: dict[int, str] = {}
+    for raw_idx, raw_ruling in rulings.items():
+        idx = _question(int(raw_idx))
+        ruling = str(raw_ruling).strip().lower()
+        if ruling not in RULINGS:
+            raise ValueError(
+                f"question {idx}: ruling {raw_ruling!r} is not one of {RULINGS}"
+            )
+        verdict = _verdicts.get(idx)
+        if verdict is None or not verdict.get("proven"):
+            raise ValueError(
+                f"question {idx} has no passing proof on record; a ruling needs a "
+                "proof to rule on"
+            )
+        verdict["ruling"] = ruling
+        key = proofs.proof_key(_staged[idx], _plan[idx].namespace)
+        proofs.save_proof(target, key, verdict)
+        recorded[idx] = ruling
+    return emit(
+        {
+            "kind": "rulings",
+            "recorded": {str(i): r for i, r in sorted(recorded.items())},
+            "confirmed": sorted(i for i, r in recorded.items() if r == "confirmed"),
+        }
+    )
+
+
 @tool(parse_docstring=True)
 @guard
 def finalize_exam(confirmed_questions: list[int], summary: str) -> str:
@@ -1101,6 +1175,15 @@ def finalize_exam(confirmed_questions: list[int], summary: str) -> str:
     keep = {_question(n) for n in confirmed_questions}
     if not keep:
         raise ValueError("no confirmed questions: nothing to file")
+    unrecorded = sorted(
+        i for i in keep if (_verdicts.get(i) or {}).get("ruling") != "confirmed"
+    )
+    if unrecorded:
+        raise ValueError(
+            f"questions {unrecorded} have no `confirmed` ruling on record; call "
+            "record_rulings with the critic's rulings first (a filed question is "
+            "one the record says was proven AND confirmed)"
+        )
     dropped = sorted(set(_staged) - keep)
     for idx in dropped:
         del _staged[idx]
@@ -1154,6 +1237,7 @@ COMMANDER_TOOLS = [
     prove_all,
     prove_questions,
     grader_details,
+    record_rulings,
     finalize_exam,
     FILE_REPORT_TOOL,
 ]

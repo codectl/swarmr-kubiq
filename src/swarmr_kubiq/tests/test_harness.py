@@ -301,6 +301,32 @@ def test_a_check_that_passes_unsolved_fails_the_negative_control(
     assert "negative control FAILED" in _digest(verdict)
 
 
+class _GuardCheckKubiq(FakeKubiq):
+    """Two checks: one real, one a guard that is ok before the solution.
+    The question as a whole fails untouched, so the question-level control
+    holds — the per-check rule is what refuses it."""
+
+    def _grade(self, question: int) -> dict[str, Any]:
+        solved = question in self.solved
+        return {
+            "passed": solved,
+            "results": [
+                {"name": "web runs nginx", "ok": solved, "detail": ""},
+                {"name": "the old Deployment still exists", "ok": True, "detail": ""},
+            ],
+        }
+
+
+def test_a_single_check_passing_untouched_is_not_proven(
+    tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
+) -> None:
+    verdict = _prove_one(_GuardCheckKubiq(), tmp_path)
+    assert verdict.passed is True and verdict.negative_control_ok is True
+    assert verdict.passes_untouched == ["the old Deployment still exists"]
+    assert verdict.proven is False
+    assert verdict.to_json()["passes_untouched"] == ["the old Deployment still exists"]
+
+
 def test_heredoc_in_the_solution_reaches_the_shell_intact(
     tmp_path: Path, no_sleep: list[float], kubectl: FakeKubectl
 ) -> None:

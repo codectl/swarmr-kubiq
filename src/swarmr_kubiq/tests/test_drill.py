@@ -378,3 +378,23 @@ def test_strict_allows_minting_the_key_in_a_hook() -> None:
         )
     }
     validate_drill(d, "d", strict=True)
+
+
+@pytest.mark.parametrize(
+    ("extra", "needle"),
+    [
+        ("docs:\n  - https://kubernetes.io/docs/x\n", r"docs\[0\] must be a mapping"),
+        (
+            "setup:\n  - apiVersion: v1\n    kind: ConfigMap\n    metadata: {name: c}\n",
+            "`setup` must be one block string",
+        ),
+    ],
+)
+def test_parse_names_the_field_for_shapes_authors_get_wrong(
+    extra: str, needle: str
+) -> None:
+    """A `docs` entry that is a bare URL and a `setup` written as a YAML list
+    used to crash as `dictionary update sequence` / `'list' has no attribute
+    'read'`; an author cannot act on those."""
+    with pytest.raises(DrillError, match=needle):
+        parse_drill(MINIMAL + extra)
