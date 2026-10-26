@@ -1,6 +1,6 @@
 [project]
 name = "swarmr-kubiq"
-version = "0.2.0"
+version = "0.3.0"
 description = "Agent team that authors Kubernetes mock exams for kubiq and proves every question on a live cluster before opening a PR"
 readme = "README.md"
 requires-python = ">=3.13"

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/codectl/swarmr-kubiq/compare/v0.2.0...v0.3.0) (2026-10-26)
+
+
+### Features
+
+* persist critic rulings, enforce per check negative control and compose namespaces ([#5](https://github.com/codectl/swarmr-kubiq/issues/5)) ([838da32](https://github.com/codectl/swarmr-kubiq/commit/838da327698ff74fbd443218035cc1e503c9af8d))
+
 ## [0.2.0](https://github.com/codectl/swarmr-kubiq/compare/v0.1.0...v0.2.0) (2026-10-26)
 
 
