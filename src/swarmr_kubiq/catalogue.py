@@ -343,6 +343,22 @@ def render_facts(
         "Kubernetes version to author against: "
         + (t.version or "not specified; use the cluster's version"),
         f"Existing drills: {len(cat.drills)} across {len(cat.exams)} exams",
+        "Namespaces other exams already use (plan_exam refuses them; choose a "
+        "unique namespace): "
+        + (
+            ", ".join(
+                sorted(
+                    {
+                        ns
+                        for e in cat.exams
+                        if e.id != t.exam
+                        for q in e.questions
+                        if (ns := q.namespace)
+                    }
+                )
+            )
+            or "none"
+        ),
         "",
         f"{t.certification} curriculum (CNCF): domain, share of the exam, and the "
         "competencies it covers. Every question must exercise one of these "
@@ -369,13 +385,25 @@ def render_facts(
         lines.append(
             "RESUMED from an earlier run of this exam: these questions are already "
             "staged at these numbers. Do not re-author them; plan the remaining "
-            "numbers around them, then prove and critique every question, resumed "
-            "ones included (no proof survives a restart)."
+            "numbers around them. The state after each is the persisted record, "
+            "valid while the drill and namespace are unchanged: CONFIRMED means "
+            "proven and ruled confirmed — nothing to do, it is ready for "
+            "finalize_exam; PROVEN means proven but not yet ruled — send it to a "
+            "critic, never to prove_questions; REFUTED/UNPROVEN means the critic "
+            "sent it back — a fix round; unproven means it needs a proof."
         )
         for r in resumed:
+            ruling = str(r.get("ruling") or "")
+            state = (
+                ruling.upper()
+                if ruling and r.get("proven")
+                else "PROVEN"
+                if r.get("proven")
+                else "unproven"
+            )
             lines.append(
                 f"  - {r['question']}. {r['drill']} · {r['topic']} · {r['title']} "
-                f"· weight {r['weight']} · ns {r['namespace']}"
+                f"· weight {r['weight']} · ns {r['namespace']} · {state}"
             )
         broken = [r for r in resumed if r.get("problem")]
         if broken:

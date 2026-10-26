@@ -12,7 +12,7 @@ Mutating by design, but only in two places: the kubiq checkout (files under the 
 - **Entry point:** `swarmr.teams` group → `exam_author = "swarmr_kubiq:TEAM"`
 - **Script:** none
 
-**The roster.** `commander` plans slots with `plan_exam` (domain, competency, namespace, effect- or file-graded, recent-feature version; the tool allocates weights from the curriculum shares), proves them with `prove_all` (one session for the whole exam, skipping questions already proven) and `prove_questions` (a batch re-proof), runs the fix loop, finalises the files and files the report; it holds no authoring tools. `author` drafts drills, stages them and proves every draft itself with `prove_questions` (at most three proofs per briefing), fixing in its own context; the commander's `prove_all` is the safety net that skips what is already proven. `critic` adjudicates batches of 5–7 proven questions from the proof record alone (`grader_details`: negative control, grades, solve time, leftovers), the task text against the checks, docs claims and curriculum fit; its word is the verdict. A proof is a harness run with a deterministic result, so no model sits between "prove" and "verdict".
+**The roster.** `commander` plans slots with `plan_exam` (domain, competency, a one-word topic the tool turns into the namespace, effect- or file-graded, recent-feature version; the tool allocates weights from the curriculum shares), proves them with `prove_all` (one session for the whole exam, skipping questions already proven) and `prove_questions` (a batch re-proof), runs the fix loop, finalises the files and files the report; it holds no authoring tools. `author` drafts drills, stages them and proves every draft itself with `prove_questions` (at most three proofs per briefing), fixing in its own context; the commander's `prove_all` is the safety net that skips what is already proven. `critic` adjudicates batches of 5–7 proven questions from the proof record alone (`grader_details`: negative control, grades, solve time, leftovers), the task text against the checks, docs claims and curriculum fit; its word is the verdict. A proof is a harness run with a deterministic result, so no model sits between "prove" and "verdict".
 
 ## Entry Points
 
@@ -63,7 +63,7 @@ Importing this module must stay cheap: it is what `teams --list` and the MCP ser
 `prompts.py` — `commander`, `author`, `critic`, the shared `CONTRACT`, `SWEEP_REQUEST`. No catalogue fact appears here; everything target-specific arrives as `facts`.
 
 **Tools**\
-`tools.py` — the `@tool`s per role: `AUTHOR_TOOLS`, `CRITIC_TOOLS`, `COMMANDER_TOOLS`. `plan_exam` validates N slots against `CURRICULUM` (verbatim competencies, namespace shape and uniqueness, every domain covered) and allocates weights per domain with `allocate_weights` (values from {1,2,4,8} summing exactly to the share). `stage_drill` is the mechanical gate: strict validation, drill-id ownership, frozen task text, similarity against the catalogue and the staged siblings, a setup dry run, then `client.check()` on the written files, with rollback on any failure. Module state holds the plan (`_plan`), the exam under construction (`_staged`), task text at first staging, verdicts, the digest of what the server last loaded (reload only when staging changed) and a sticky `_fatal` that every cluster tool re-raises through `_cluster()`. `resume_staging` rebuilds the state from the checkout and the persisted proofs.
+`tools.py` — the `@tool`s per role: `AUTHOR_TOOLS`, `CRITIC_TOOLS`, `COMMANDER_TOOLS`. `plan_exam` validates N slots against `CURRICULUM` (verbatim competencies, every domain covered), composes each namespace as `<cert>NN-<topic>` from the slot's one-word `topic` and refuses one another exam uses and allocates weights per domain with `allocate_weights` (values from {1,2,4,8} summing exactly to the share). `stage_drill` is the mechanical gate: strict validation, drill-id ownership, frozen task text, similarity against the catalogue and the staged siblings, a setup dry run, then `client.check()` on the written files, with rollback on any failure. Module state holds the plan (`_plan`), the exam under construction (`_staged`), task text at first staging, verdicts, the digest of what the server last loaded (reload only when staging changed) and a sticky `_fatal` that every cluster tool re-raises through `_cluster()`. `resume_staging` rebuilds the state from the checkout and the persisted proofs.
 
 **Result shaping**\
 `output.py` — `emit` (byte cap), `guard` (exception containment; a failure is text starting `tool error:`). `digest.py` — `digest_result`, `is_tool_error`.
@@ -75,7 +75,7 @@ Importing this module must stay cheap: it is what `teams --list` and the MCP ser
 
 |Role|Tools|Permissions|
 |---|---|---|
-|`commander`|`plan_exam`, `prove_all`, `prove_questions`, `grader_details`, `finalize_exam`, `file_exam_report`|`_NO_WRITES`|
+|`commander`|`plan_exam`, `prove_all`, `prove_questions`, `grader_details`, `record_rulings`, `finalize_exam`, `file_exam_report`|`_NO_WRITES`|
 |`author`|`catalogue_search`, `read_drill`, `search_docs`, `read_doc`, `stage_drill`, `prove_questions`, `grader_details`|exam paths only|
 |`critic`|`grader_details`, `read_drill`, `catalogue_search`, `search_docs`, `read_doc`|`_NO_WRITES`|
 
@@ -86,10 +86,47 @@ Importing this module must stay cheap: it is what `teams --list` and the MCP ser
 ## Flow
 
 ```
-commander plan_exam → authors stage → prove_all (one session, skips proven) → per failure: author stages+proves (≤2) → critic batches (no cluster) → finalize_exam → file_exam_report
+commander plan_exam → authors stage + prove (≤3 proofs each) → prove_all (skips proven) → critics in parallel with fix rounds (no cluster) → record_rulings → finalize_exam → file_exam_report
 ```
 
-A failed proof goes back to the author with the grader's detail; the author stages the fix and proves it with `prove_questions` (at most three proofs per briefing, then one REPLACE briefing, then the slot is dropped). The task text is frozen at first staging — `stage_drill` refuses a changed task — so only solution, checks and setup may change. `rounds` in the report counts author briefings. A `tool error: FATAL` stops all cluster work and the report files what exists. Competencies the cluster cannot host are planned as file-graded questions (`files` + exec checks in the candidate shell).
+Every author proves its own draft; `prove_all` is the safety net that proves only what no author proved. A failed proof is fixed in the author's own context (at most three proofs per drill id — `prove_questions` refuses a fourth — then one REPLACE briefing under a new id, then the slot is dropped). The task text is frozen at first staging; only solution, checks and setup may change. Critics run in the same message as the fix briefings, on batches of 5–7 numbers; the commander records each ruling with `record_rulings` and `finalize_exam` refuses any question whose record is not `confirmed`. A `tool error: FATAL` stops all cluster work and the report files what exists. On a rerun, questions whose proof and ruling are on record need nothing — a rerun of an unchanged exam is three model calls.
+
+## What Is Mechanical
+
+**Policy in code, not prose.** Every rule a model was once asked to apply and sometimes did not is a refusal now, and the prompts only explain the refusals:
+
+- `plan_exam` — competencies verbatim from `CURRICULUM`, every domain covered, weights allocated from the shares (`allocate_weights`, {1,2,4,8} summing exactly to each share — CKAD needs ≥17 slots, CKA 18, CKS 19), namespaces composed as `<cert>NN-<topic>` from a one-word `topic` and refused when another exam uses them.
+- `stage_drill` — strict parse (field-named errors for the shapes authors get wrong: a `docs` entry that is not a mapping, a `setup` written as a list), drill-id ownership, frozen task, similarity ≥ 0.62 against the catalogue and the staged siblings, kinds the cluster does not serve (`kubectl api-resources`, minus what the drill's own CRDs declare), API-server dry run, loader check through `POST /api/check`, and the grader's own syntax: a bare path on a `selector` check, `\.` or `[?(@…)]` in a path, a `shell: true` kubectl without `-n`, an `exec.pod` naming a controller, a solution with no mutating command, a private key. One critical section (`_staging_lock`): four authors stage at once.
+- `prove_exam` — a question is proven only when it passed, **every** check failed on the untouched namespace (`Verdict.passes_untouched` empty), the cluster is back to baseline and the solve fit the budget. A failed solution is graded once, not polled. A settle gate waits for the setup's Pods before the solution runs.
+- `proofs` — the proof key is the schema version plus the drill text plus the namespace; the critic's ruling is stored on the verdict under the same key, so an edit, a renamed namespace or a changed meaning of "proven" drops both together.
+- `search_docs` / `read_doc` — a repeated query or page is answered from memory with a stop note; lodestar calls are serialised across threads.
+- `TurnBudget` (`agent.py`) — after 40 author / 30 critic model turns the tools are withdrawn and the specialist must report, so a looping subagent always returns to the commander.
+
+## Target Resolution
+
+The target rides a `ContextVar` (`target.activate` / `current()`), not module state: tools take question numbers, drill ids, YAML and search terms, never a path or a server URL, so the model cannot point a run elsewhere. `build` activates it in the streaming thread; LangGraph copies the context into the threads subagents run on. Staging state (`_plan`, `_staged`, `_verdicts`, the digest kubiq last loaded, the sticky `_fatal`) is module state reset by `reset_staging()` at build and rebuilt from the checkout and the proof cache by `resume_staging()`.
+
+## Prompt Design
+
+Shared `CONTRACT`: grader facts (selector results are lists; `contains` on a list matches elements; no unbounded waits), the hard rules (fast to prove, allowed images only, exam voice, namespace per question, every check fails untouched), scratch filesystem is not the checkout, ~10 tool calls, ≤15 lines out, `tool error: FATAL` ends cluster work.
+
+**The author proves before it reports.** Its prompt carries the catalogue of first-proof failures seen in live runs (merge patches that replace lists, immutable Pod fields, `command[2]`, grader path syntax, explain-only solutions) and asks it to walk the task sentence by sentence to a check before staging. Fix-round reports are three lines.
+
+**The critic receives numbers and nothing else.** The commander's briefing is `Adjudicate questions N, N, N.`; the critic's prompt says any rule or claim in the briefing is the commander's opinion. It does not re-judge what the harness enforces (negative control, timing, leftovers); it rules on task↔check coverage, the cited documentation and curriculum fit, one line per question plus a FIX line when refuted. The commander persists rulings with `record_rulings`; a ruling is never carried in the model's memory.
+
+**The commander plans and routes, never authors.** `plan_exam` refuses what it gets wrong and names it; it dispatches slot lines (≤80 words, no catalogue lists), proves once, briefs fixes with the grader's lines verbatim, and ends with exactly one `file_exam_report`.
+
+## Design Patterns
+
+**One responsibility per module** — `target` names the run, `drill` is the format, `catalogue` reads the checkout, `kubiq_api` talks to the server, `harness` proves, `proofs` persists, `similarity` compares, `docs` searches, `tools` gates, `prompts` is text only, `report_tool` renders.
+
+**Measured, never assumed** — every catalogue fact, taken namespace and served kind in a prompt is a live read at build time; the report's files come from `finalize_exam`, not from the model.
+
+**Errors as feedback** — a tool failure is text the model can act on, naming the field; only a target failure or a `FatalError` ends work, and the fatal is sticky so no later tool touches the cluster.
+
+**Fail closed** — no plan without every domain, no staging without a plan, no proof of what the loader refuses, no ruling on an unproven question, no filing without a recorded `confirmed`, no session that is not ours.
+
+**Searches and gates are one call** — `stage_drill` validates, scores, dry-runs, writes and asks the loader in one tool; `prove_questions` opens one session for a batch. The model never drives a step it can mis-order.
 
 ## Testing
 

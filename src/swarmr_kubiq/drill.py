@@ -316,6 +316,18 @@ def parse_drill(text: str, where: str = "<drill>") -> Drill:
     order = data.get("order")
     if not isinstance(order, int):
         raise DrillError(f"{where}: `order` must be an integer")
+    for i, d in enumerate(docs):
+        if not isinstance(d, dict):
+            raise DrillError(
+                f"{where}: docs[{i}] must be a mapping with `label` and `url`, not "
+                f"{type(d).__name__}"
+            )
+    setup = data.get("setup")
+    if setup is not None and not isinstance(setup, str):
+        raise DrillError(
+            f"{where}: `setup` must be one block string of YAML documents (`setup: |`, "
+            "documents separated by `---`), not a YAML list"
+        )
     drill = Drill(
         id=_str(data, "id", where),
         order=order,
@@ -327,7 +339,7 @@ def parse_drill(text: str, where: str = "<drill>") -> Drill:
         checks=checks,
         docs=[dict(d) for d in docs],
         hint=data.get("hint"),
-        setup=data.get("setup"),
+        setup=setup,
         cleanup=[str(x) for x in cleanup],
         files={str(k): str(v) for k, v in files.items()},
     )

@@ -68,6 +68,14 @@ def test_key_changes_with_namespace_task_or_solution() -> None:
     ) != (base)
 
 
+def test_key_changes_with_the_proof_rule_version(monkeypatch) -> None:
+    """A verdict recorded under an older meaning of `proven` must never be
+    found again: proof and the ruling stored with it vanish together."""
+    now = proofs.proof_key(_drill(), "ckad01-pod")
+    monkeypatch.setattr(proofs, "PROOF_SCHEMA", proofs.PROOF_SCHEMA - 1)
+    assert proofs.proof_key(_drill(), "ckad01-pod") != now
+
+
 def test_cache_path_lives_under_xdg_cache_home_per_checkout_and_exam(
     cache_home: Path, tmp_path: Path
 ) -> None:

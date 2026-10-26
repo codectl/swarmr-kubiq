@@ -146,10 +146,18 @@ class Verdict:
         return self.solve_seconds > solve_budget()
 
     @property
+    def passes_untouched(self) -> list[str]:
+        """Checks that were ok on the untouched namespace. Such a check grades
+        nothing: a question is proven only when every check fails before the
+        solution, so this list must be empty."""
+        return [str(r.get("name", "?")) for r in self.results_before if r.get("ok")]
+
+    @property
     def proven(self) -> bool:
         return (
             self.passed
             and self.negative_control_ok
+            and not self.passes_untouched
             and not self.leftovers
             and not self.too_slow
         )
@@ -159,6 +167,7 @@ class Verdict:
             "kind": "verdict",
             "proven": self.proven,
             "too_slow": self.too_slow,
+            "passes_untouched": self.passes_untouched,
             **asdict(self),
         }
 

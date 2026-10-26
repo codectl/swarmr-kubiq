@@ -26,12 +26,20 @@ from typing import Any
 from swarmr_kubiq.drill import Drill, dump_drill
 from swarmr_kubiq.target import Target
 
-__all__ = ["cache_path", "load_proofs", "proof_key", "save_proof"]
+__all__ = ["PROOF_SCHEMA", "cache_path", "load_proofs", "proof_key", "save_proof"]
+
+# Bumped whenever what "proven" means changes, so a verdict recorded under an
+# older rule can never vouch for a question under the new one; old entries
+# simply miss and the question is proved again.
+#   1  question-level negative control
+#   2  every check must fail on the untouched namespace
+PROOF_SCHEMA = 2
 
 
 def proof_key(drill: Drill, namespace: str | None) -> str:
-    """SHA-256 of the staged drill text and its namespace; the proof's identity."""
-    material = dump_drill(drill) + "\0" + (namespace or "")
+    """SHA-256 of the proof rule version, the staged drill text and its
+    namespace; the proof's identity."""
+    material = f"v{PROOF_SCHEMA}\0" + dump_drill(drill) + "\0" + (namespace or "")
     return hashlib.sha256(material.encode()).hexdigest()
 
 
