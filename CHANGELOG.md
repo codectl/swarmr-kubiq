@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/codectl/swarmr-kubiq/compare/v0.4.0...v0.4.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* refuse outgrown exam resume and added timestamps ([#23](https://github.com/codectl/swarmr-kubiq/issues/23)) ([5dbdccf](https://github.com/codectl/swarmr-kubiq/commit/5dbdccf792df8469e69fd773a91fca3c23eb030b))
+
 ## [0.4.0](https://github.com/codectl/swarmr-kubiq/compare/v0.3.0...v0.4.0) (2026-11-12)
 
 
