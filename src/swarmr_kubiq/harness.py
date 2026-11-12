@@ -392,7 +392,12 @@ def prove_exam(
 
 def _verdict_word(report: dict[str, Any]) -> str:
     """How a negative control reads: it must FAIL, so 'failed as required'."""
-    return "passed (TOO PERMISSIVE)" if report.get("passed") else "failed as required"
+    if report.get("passed"):
+        return "passed (TOO PERMISSIVE)"
+    untouched = sum(bool(r.get("ok")) for r in report.get("results") or [])
+    if untouched:
+        return f"{untouched} check(s) passed untouched (TOO PERMISSIVE)"
+    return "failed as required"
 
 
 def reclaim_sessions(client: SessionClient, exam_id: str) -> list[str]:
@@ -500,10 +505,19 @@ def _solve(
     while True:
         report = client.grade(sid, question_index)
         elapsed = time.monotonic() - started
-        if report.get("passed") or elapsed >= cap:
+        if report.get("passed") or elapsed >= cap or _hopeless(report):
             report["solve_seconds"] = round(time.monotonic() - begun, 1)
             return rc, out, err, round(elapsed, 1), report, setup_settle
         _sleep(SETTLE_POLL)
+
+
+def _hopeless(report: dict[str, Any]) -> bool:
+    """A failing check that no amount of waiting repairs: its command is not
+    in the candidate's shell (exit 127). Polling it to the cap cost 90 s."""
+    return any(
+        not r.get("ok") and "exit code 127" in str(r.get("detail", ""))
+        for r in report.get("results") or []
+    )
 
 
 def _results(report: dict[str, Any]) -> list[dict[str, Any]]:

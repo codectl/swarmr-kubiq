@@ -12,6 +12,7 @@ Mirrors `discovery.py` in the sibling teams. Every call is a read.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
@@ -335,6 +336,19 @@ def profile_catalogue(target: Target | None = None) -> Catalogue:
     return cat
 
 
+_APK_ADD = re.compile(r"apk add\s+(?:--\S+\s+)*([^&\n]+)")
+
+
+def shell_tools(target: Target) -> list[str]:
+    """Packages kubiq's candidate shell image installs (`shell/Dockerfile`);
+    empty when the checkout has no such file."""
+    try:
+        text = (target.kubiq / "shell" / "Dockerfile").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [pkg for line in _APK_ADD.findall(text) for pkg in line.split()]
+
+
 def render_facts(
     cat: Catalogue,
     target: Target | None = None,
@@ -359,6 +373,8 @@ def render_facts(
         f"Test cluster: {cat.cluster_version or 'unknown (kubectl did not answer)'}",
         "Kubernetes version to author against: "
         + (t.version or "not specified; use the cluster's version"),
+        "Candidate shell tools (exec checks and solutions run there; nothing "
+        "else is installed): " + (", ".join(shell_tools(t)) or "unknown"),
         f"Existing drills: {len(cat.drills)} across {len(cat.exams)} exams",
         "Namespaces other exams already use (plan_exam refuses them; choose a "
         "unique namespace): "

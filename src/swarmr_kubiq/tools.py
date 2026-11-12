@@ -84,6 +84,17 @@ __all__ = [
 
 _PASS_PERCENT = {"CKAD": 75, "CKA": 66, "CKS": 67}
 _DURATION_MINUTES = 120
+
+
+def _duration(target: Target) -> int:
+    """Minutes the exam runs: the real exam's two hours at full size, and the
+    same time per question, rounded up to five minutes, on a short exam."""
+    full = fewest_exam_slots(s for s, _ in CURRICULUM[target.certification].values())
+    if target.questions >= full:
+        return _DURATION_MINUTES
+    return -(-_DURATION_MINUTES * target.questions // (full * 5)) * 5
+
+
 _WEIGHTS = (8, 4, 2, 1)
 _MOCK_NUMBER = re.compile(r"-(\d+)$")
 # A namespace topic word: `ckad07-bluegreen` is prefix + this.
@@ -158,6 +169,12 @@ def resume_staging(target: Target) -> list[dict[str, Any]]:
     # An exam file larger than the run asks for is not this run's to continue:
     # a plan of N slots has no place for question N+1, and the usual cause is
     # an id that names a finished exam. Stop before the first token.
+    if exam.certification != target.certification:
+        raise TargetError(
+            f"exams/{target.exam}.yaml is a {exam.certification} exam and this run "
+            f"authors {target.certification}; pass certification="
+            f"{exam.certification} or choose another exam id."
+        )
     if len(exam.questions) > target.questions:
         raise TargetError(_outgrown(target, len(exam.questions)))
     by_id: dict[str, Drill] = {}
@@ -547,10 +564,10 @@ def write_exam_file() -> list[Path]:
         certification=target.certification,
         description=(
             f"{target.questions} questions mirroring the {target.certification} "
-            f"domains, {_DURATION_MINUTES // 60} hours, pass at "
+            f"domains, {_duration(target)} minutes, pass at "
             f"{_PASS_PERCENT[target.certification]} %."
         ),
-        duration_minutes=_DURATION_MINUTES,
+        duration_minutes=_duration(target),
         pass_percent=_PASS_PERCENT[target.certification],
         questions=questions,
         draft=len(questions) < target.questions,
@@ -896,6 +913,25 @@ def _refuse_unscoped_exec(drill: Drill, namespace: str) -> None:
             )
 
 
+_WAITING = re.compile(r"kubectl\b[^|;&]*\b(wait|rollout\s+status)\b")
+
+
+def _refuse_waiting_checks(drill: Drill) -> None:
+    """A check that waits makes the candidate's Check button hang for as long
+    as its timeout; the grade is polled, so a check only ever reads state."""
+    for i, c in enumerate(drill.checks):
+        if c.exec is None:
+            continue
+        command = " ".join(str(p) for p in c.exec.get("command") or [])
+        if _WAITING.search(command):
+            raise ValueError(
+                f"checks[{i}] ({c.name!r}) waits (`kubectl wait` / `rollout "
+                "status`): a check reads state and returns at once. Assert "
+                "`status.availableReplicas` or `status.readyReplicas` with a "
+                "resource check instead; the proof polls the grade"
+            )
+
+
 # Staging mutates `_staged`, `_plan` and the exam file; several authors stage at
 # once, so the whole operation is one critical section.
 _staging_lock = threading.Lock()
@@ -934,6 +970,14 @@ def _stage_drill(drill_yaml: str, question_index: int) -> str:
             f"no plan for question {idx}; the commander must call plan_exam first"
         )
     drill = _parse_strict(drill_yaml)
+    if _proofs_taken.get((idx, drill.id), 0) >= PROOF_BUDGET:
+        raise ValueError(
+            f"proof budget exhausted for {drill.id!r} at question {idx}: "
+            f"{PROOF_BUDGET} proofs taken this run, so this version could never be "
+            "proven. Report RESULT: FAILED with the last grader lines; a new drill "
+            "id (REPLACE) gets a fresh budget"
+        )
+    _refuse_waiting_checks(drill)
     target = current()
     for other, staged in _staged.items():
         if other != idx and staged.id == drill.id:
@@ -1020,6 +1064,7 @@ def _summary(payload: dict[str, Any]) -> dict[str, Any]:
         "question": payload["question"],
         "drill": payload["drill"],
         "proven": payload["proven"],
+        "solve_seconds": payload.get("solve_seconds", 0.0),
     }
     if not payload["proven"]:
         out["why"] = (
@@ -1072,7 +1117,7 @@ def _prove(idxs: list[int], skipped: list[int]) -> str:
                     title=_exam_title(target),
                     certification=target.certification,
                     description="",
-                    duration_minutes=_DURATION_MINUTES,
+                    duration_minutes=_duration(target),
                     pass_percent=_PASS_PERCENT[target.certification],
                     questions=_questions(),
                     draft=True,
