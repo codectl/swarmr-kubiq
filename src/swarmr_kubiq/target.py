@@ -41,8 +41,10 @@ PARAMS = (
     ),
     Param(
         "certification",
-        "Which certification the exam mocks: CKAD (default), CKA or CKS. Sets the "
-        "curriculum the author follows and the group the exam is listed under.",
+        "Which certification the exam mocks: CKAD, CKA or CKS. Defaults to the one "
+        "the exam id starts with (`cks-mock-1` is CKS), else CKAD; an id that names "
+        "another certification is refused. Sets the curriculum the author follows "
+        "and the group the exam is listed under.",
         required=False,
     ),
     Param(
@@ -131,10 +133,19 @@ def activate(params: dict[str, str] | None) -> Target:
             f"exam={exam!r} is not a valid exam id; use lowercase letters, digits "
             "and dashes, e.g. ckad-mock-7."
         )
-    cert = (given.get("certification") or "CKAD").strip().upper()
+    # The id's own prefix is the default: `cks-mock-1` asked for without a
+    # certification was once written as a CKAD exam under a CKS id.
+    named = exam.split("-", 1)[0].upper()
+    cert = (given.get("certification") or "").strip().upper()
+    cert = cert or (named if named in _CERTS else "CKAD")
     if cert not in _CERTS:
         raise TargetError(
             f"certification={cert!r} is not one of {', '.join(sorted(_CERTS))}."
+        )
+    if named in _CERTS and named != cert:
+        raise TargetError(
+            f"exam={exam!r} names a {named} exam but certification={cert}; rename "
+            "the exam or drop the certification."
         )
     raw_n = (given.get("questions") or "").strip()
     try:

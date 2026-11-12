@@ -607,7 +607,7 @@ def test_prove_all_skips_proven_questions_and_saves_proofs(
     assert asked == [[0, 1]]
     assert _server_calls().count("reload") == 1
     rows = batch["questions"]
-    assert set(rows[0]) == {"question", "drill", "proven"}
+    assert set(rows[0]) == {"question", "drill", "proven", "solve_seconds"}
     assert rows[1]["why"] == "checks failed" and rows[1]["failing"][0]["check"] == "c"
     full = _call(tools.grader_details, question_index=1)
     assert full["kind"] == "verdict" and full["results_before"][0]["ok"] is False
