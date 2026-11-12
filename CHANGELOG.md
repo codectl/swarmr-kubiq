@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/codectl/swarmr-kubiq/compare/v0.3.0...v0.4.0) (2026-11-12)
+
+
+### Features
+
+* allow short exams by splitting each domain share evenly below the exam weight minimum ([#21](https://github.com/codectl/swarmr-kubiq/issues/21)) ([276990a](https://github.com/codectl/swarmr-kubiq/commit/276990a336b225931f68eff754e9dca4f51c2562))
+
 ## [0.3.0](https://github.com/codectl/swarmr-kubiq/compare/v0.2.0...v0.3.0) (2026-10-26)
 
 
