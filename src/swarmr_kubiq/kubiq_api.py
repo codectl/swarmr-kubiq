@@ -159,7 +159,29 @@ class KubiqClient:
         body: dict[str, Any] = {"exam_id": exam_id}
         if questions is not None:
             body["questions"] = questions
-        return self._call("POST", "/api/sessions", json=body).json()
+        response = self._call("POST", "/api/sessions", json=body, allow=(409,))
+        if response.status_code == 409:
+            text = _error_text(response)
+            if "left objects behind" in text:
+                # kubiq latches a failed teardown until an operator clears it:
+                # no later session can open, so retrying only burns proofs.
+                raise FatalError(
+                    f"kubiq refuses every session: {text}. Delete what it names "
+                    f"with kubectl, then `curl -X DELETE {self.base_url}/api/teardown`. "
+                    "Do not retry."
+                )
+            raise KubiqError(f"kubiq 409 on POST /api/sessions: {text}")
+        return response.json()
+
+    def teardown(self) -> dict[str, Any]:
+        """kubiq's teardown state: `{"state": "idle" | "running" | "failed"}`,
+        with the failures under `error` when failed."""
+        view = self._call("GET", "/api/teardown").json()
+        return view if isinstance(view, dict) else {"state": str(view)}
+
+    def ack_teardown(self) -> None:
+        """Clear a failed teardown after the leftovers were removed."""
+        self._call("DELETE", "/api/teardown")
 
     def wait_ready(self, sid: str, timeout: float = 300) -> dict[str, Any]:
         """Poll until the shell and the question namespaces exist.

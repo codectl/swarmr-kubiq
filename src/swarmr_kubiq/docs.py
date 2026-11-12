@@ -252,16 +252,20 @@ def _parse_hits(text: str) -> list[dict[str, Any]]:
 
 
 def whats_new(version: str, client: DocsClient | None = None) -> list[dict[str, Any]]:
-    """Release-note material for a Kubernetes minor, deduplicated by URL."""
+    """Pages whose feature became stable or beta in a Kubernetes minor,
+    deduplicated by URL.
+
+    kubernetes.io stamps each such section "Feature state: Stable since
+    Kubernetes v1.36"; the quoted phrase finds them, where "what's new" finds
+    nothing (release notes are not indexed)."""
     c = client or DocsClient()
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
     for query in (
-        f"Kubernetes {version} what's new",
-        f"feature gate graduated {version}",
-        f"deprecated {version}",
+        f'"Stable since Kubernetes v{version}"',
+        f'"Beta since Kubernetes v{version}"',
     ):
-        for hit in c.search(query, limit=5):
+        for hit in c.search(query, limit=20):
             if hit["url"] not in seen:
                 seen.add(hit["url"])
                 out.append({**hit, "query": query})

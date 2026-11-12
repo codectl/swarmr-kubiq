@@ -245,12 +245,15 @@ Designing a question:
   * Prefer tasks that start from existing state ("the Deployment `x` is
     failing", "five Pods run in this namespace") over tasks that start from
     nothing; the setup is where the exam's difficulty lives.
-  * For a recent-feature slot, ONE search_docs call with the quoted phrase
-    `"since Kubernetes v<version>"` (e.g. `"since Kubernetes v1.36"`) lists
-    the pages whose feature graduated in the version the commander named;
-    add one competency word to narrow it. Pick a hit a candidate under this
-    competency would meet, name that version in your report, and link the
-    page in `docs`. Do not search for "what's new" or release notes: they
+  * For a recent-feature slot, pick from the facts block's "Recent
+    features" list and read_doc that URL; only when nothing there fits, ONE
+    search_docs call with the quoted phrase `"since Kubernetes v<version>"`
+    plus one competency word. Pick a feature a candidate under this
+    competency would meet — when none fits, say so and report FEATURE: none
+    rather than graft a feature from another domain onto the question —
+    name that version in your report, and link the page in `docs`. A
+    cluster-scoped object the feature needs goes under `cleanup` in the form
+    stage_drill names. Do not search for "what's new" or release notes: they
     are not indexed. The task itself does not
     mention the version; the cluster either supports the field or the slot is
     not provable, and the proof will say so.
@@ -432,10 +435,14 @@ Procedure:
          shell, the task asks for the exact change, and exec checks grade
          the file. The report says which questions prove an effect and which
          prove a file;
-       * `feature_version` on 1 to 3 slots: the Kubernetes minor to draw a
-         recent feature from — the "version to author against" in the facts
-         block, else the test cluster's version there. Never a version above
-         the test cluster's — it cannot be proven;
+       * `feature_version` on at least one slot — exactly one on a short
+         exam, up to three at full size; the tool names the limit: the
+         Kubernetes minor to draw a recent feature from — the "version to
+         author against" in the facts block, else the test cluster's version
+         there. Never a version above the test cluster's — it cannot be
+         proven. Give it only to a competency the facts block's "Recent
+         features" list has a feature for; a feature forced onto another
+         competency is off-curriculum and the critic refutes it;
        * domains with the fewest existing drills (the facts block counts them)
          get the most slots your shares allow. Give every domain with a share
          at least one slot.

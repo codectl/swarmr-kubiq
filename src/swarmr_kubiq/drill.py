@@ -71,7 +71,7 @@ GRADER_KINDS = frozenset(_GRADER_KINDS_TEXT.split())
 
 # A solution must do something. Read-only kubectl, `vim` and prose are not it.
 _MUTATING = re.compile(
-    r"\b(kubectl|k)\s+(apply|create|patch|set|scale|delete|replace|label|annotate|"
+    r"\b(kubectl|k)\s+(?:--?[\w-]+(?:=\S+|\s+[^-\s]\S*)?\s+)*(apply|create|patch|set|scale|delete|replace|label|annotate|"
     r"expose|run|rollout|debug|edit|taint|cordon|uncordon|drain|autoscale|cp)\b"
     r"|\bhelm\s+(install|upgrade|uninstall|rollback|repo|dependency)\b"
     r"|\bkustomize\s+build\b|(^|[^<])>\s*\S|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b"

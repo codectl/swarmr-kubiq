@@ -41,7 +41,12 @@ from typing import Any
 from langchain_core.tools import tool
 
 from swarmr_kubiq import docs, harness, kubiq_api, pr, proofs, similarity
-from swarmr_kubiq.catalogue import CURRICULUM, Catalogue, profile_catalogue
+from swarmr_kubiq.catalogue import (
+    CURRICULUM,
+    Catalogue,
+    grader_kinds,
+    profile_catalogue,
+)
 from swarmr_kubiq.drill import (
     Drill,
     DrillError,
@@ -65,6 +70,8 @@ __all__ = [
     "Slot",
     "allocate_weights",
     "catalogue_search",
+    "check_server",
+    "feature_slots",
     "fewest_exam_slots",
     "finalize_exam",
     "grader_details",
@@ -264,6 +271,28 @@ def _outgrown(target: Target, found: int) -> str:
     )
 
 
+def feature_slots(questions: int) -> int:
+    """How many recent-feature slots an exam of this size may carry: about one
+    in seven, so 3 on a full exam and 1 on a short one."""
+    return max(1, round(questions / 7))
+
+
+def check_server(target: Target) -> None:
+    """Refuse a run on a kubiq whose last teardown failed: it opens no session
+    until that is cleared, so every proof of the run would be refused. A
+    server that does not answer is not judged here; the first proof reports it."""
+    try:
+        state = kubiq_api.KubiqClient(target.server).teardown()
+    except Exception:
+        return
+    if state.get("state") == "failed":
+        raise TargetError(
+            f"kubiq at {target.server} refuses new sessions: {state.get('error')}. "
+            "Delete what it names with kubectl, then "
+            f"`curl -X DELETE {target.server}/api/teardown`."
+        )
+
+
 def _feasible(points: int, n: int) -> tuple[int, int, int, int] | None:
     """Counts (c8, c4, c2, c1) of each weight for `n` slots worth `points`:
     fewest 1s, then fewest 2s, then most 8s. None when impossible."""
@@ -448,11 +477,14 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
     if missing:
         raise ValueError(f"questions not planned: {', '.join(map(str, missing))}")
     featured = {n: s.feature_version for n, s in planned.items() if s.feature_version}
-    if not 1 <= len(featured) <= 3:
+    most = feature_slots(target.questions)
+    if not 1 <= len(featured) <= most:
         raise ValueError(
-            f"{len(featured)} slots carry a `feature_version`; give it to 1 to 3 "
-            "slots (the version to author against in the facts block, else the "
-            "test cluster's), on competencies a recent feature can serve"
+            f"{len(featured)} slots carry a `feature_version`; a "
+            f"{target.questions}-question exam takes "
+            + ("exactly 1" if most == 1 else f"1 to {most}")
+            + " (the version to author against in the facts block, else the test "
+            "cluster's), on a competency the facts block lists a feature for"
         )
     for number, version in featured.items():
         try:
@@ -935,6 +967,23 @@ def _refuse_unscoped_exec(drill: Drill, namespace: str) -> None:
             )
 
 
+def _refuse_unremovable_cleanup(drill: Drill) -> None:
+    """kubiq deletes a `cleanup` entry only when it can resolve its kind, and
+    a teardown it cannot finish blocks every later session on the server."""
+    known = grader_kinds(current())
+    for entry in drill.cleanup:
+        kind, _, name = entry.rpartition("/")
+        if kind in known or kind.count("/") >= 3:
+            continue
+        raise ValueError(
+            f"cleanup entry {entry!r}: kubiq's teardown does not know the kind "
+            f"{kind!r} and could not delete it. Name it in full as "
+            f"`<group>/<version>/<Kind>/<plural>/cluster/{name}` (e.g. "
+            "`storage.k8s.io/v1/VolumeAttributesClass/volumeattributesclasses/"
+            "cluster/cobalt-gold`), or use one of: " + ", ".join(sorted(known))
+        )
+
+
 _WAITING = re.compile(r"kubectl\b[^|;&]*\b(wait|rollout\s+status)\b")
 
 
@@ -1000,6 +1049,7 @@ def _stage_drill(drill_yaml: str, question_index: int) -> str:
             "id (REPLACE) gets a fresh budget"
         )
     _refuse_waiting_checks(drill)
+    _refuse_unremovable_cleanup(drill)
     target = current()
     for other, staged in _staged.items():
         if other != idx and staged.id == drill.id:
@@ -1147,7 +1197,13 @@ def _prove(idxs: list[int], skipped: list[int]) -> str:
                 drills = list(_staged.values())
                 indexes = [_api_index(i) for i in idxs]
                 proved = {i: (_staged[i], _plan[i].namespace) for i in idxs}
+            # A teardown an earlier session (or a killed run) could not finish
+            # blocks this one; one this session leaves blocks every later one.
+            harness.repair_teardown(client, drills)
             verdicts = harness.prove_exam(client, target, exam, drills, indexes=indexes)
+            stuck = harness.repair_teardown(client, drills)
+            for verdict in verdicts:
+                verdict.leftovers = [*verdict.leftovers, *stuck]
         for idx, verdict in zip(idxs, verdicts, strict=True):
             payload = verdict.to_json()
             payload["question"] = idx
@@ -1223,7 +1279,14 @@ def prove_questions(question_indexes: list[int]) -> str:
     for i in idxs:
         key = (i, _staged[i].id)
         _proofs_taken[key] = _proofs_taken.get(key, 0) + 1
-    return _prove(idxs, [])
+    try:
+        return _prove(idxs, [])
+    except Exception:
+        # No verdict was produced (the session never opened, the server went
+        # away): nothing about the drill was learned, so no proof was spent.
+        for i in idxs:
+            _proofs_taken[(i, _staged[i].id)] -= 1
+        raise
 
 
 @tool(parse_docstring=True)
