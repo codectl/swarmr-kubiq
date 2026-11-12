@@ -63,8 +63,10 @@ _sleep = time.sleep
 
 def _progress(message: str) -> None:
     """One line on stderr per step: a proof runs minutes inside one tool call
-    and the operator must see it move. stderr so it never enters a tool result."""
-    print(f"  harness: {message}", file=sys.stderr, flush=True)
+    and the operator must see it move. stderr so it never enters a tool result.
+    Wall-clock stamped: the gaps between lines are where a run's time went."""
+    stamp = time.strftime("%H:%M:%S")
+    print(f"  harness {stamp}: {message}", file=sys.stderr, flush=True)
 
 
 # A solution's effects land asynchronously (a PV rebinding, a rollout, a Job

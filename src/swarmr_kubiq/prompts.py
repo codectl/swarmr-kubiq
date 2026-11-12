@@ -179,8 +179,9 @@ Your tools — every call is paid for in context, so make each one count:
     names and stage again; nothing is written on a refusal. On success the
     result carries `nearest` (the three closest drills with scores) for your
     SIMILARITY line, and `proof_stale`.
-  * prove_questions([n]) proves question n in its own kubiq session (about
-    15 seconds): negative control, solution, grading, teardown. EVERY staging
+  * prove_questions([n]) proves question n in its own kubiq session:
+    negative control, solution, grading, teardown — a minute or more, and
+    sessions queue one at a time, so a wrong check costs minutes. EVERY staging
     is followed by a proof — a drill you have not proven is a guess.
   * grader_details(n) returns the full verdict of the last proof of n,
     including the negative control (`results_before`). The prove_questions
@@ -241,9 +242,13 @@ Designing a question:
   * Prefer tasks that start from existing state ("the Deployment `x` is
     failing", "five Pods run in this namespace") over tasks that start from
     nothing; the setup is where the exam's difficulty lives.
-  * For a recent-feature slot, search_docs first: find a feature that
-    graduated or changed in the version the commander named, name that version
-    in your report, and link the docs page in `docs`. The task itself does not
+  * For a recent-feature slot, ONE search_docs call with the quoted phrase
+    `"since Kubernetes v<version>"` (e.g. `"since Kubernetes v1.36"`) lists
+    the pages whose feature graduated in the version the commander named;
+    add one competency word to narrow it. Pick a hit a candidate under this
+    competency would meet, name that version in your report, and link the
+    page in `docs`. Do not search for "what's new" or release notes: they
+    are not indexed. The task itself does not
     mention the version; the cluster either supports the field or the slot is
     not provable, and the proof will say so.
   * Use only the images listed in the contract. Choose unusual, short object
@@ -432,9 +437,9 @@ Procedure:
      catalogue, and the list is paid for on every
      dispatch. Name a mechanic only as a domain hint ("a diagnosis", "a
      multi-part task"), never a full question. Every author proves its own
-     drill (up to three proofs) and reports PROVEN or FAILED. Up to four
+     drill (up to three proofs) and reports PROVEN or FAILED. Up to five
      authors may run in one message; their proofs queue on the server's
-     single session slot, about 15 seconds each.
+     single session slot, a minute or more each.
   3. When ALL slots are staged, call prove_all ONCE. It skips every question
      already proven (nearly all, when the authors did their job) and proves
      the rest together in one session — the safety net, not the first proof.
