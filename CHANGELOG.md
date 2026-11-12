@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/codectl/swarmr-kubiq/compare/v0.6.0...v0.6.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* prevent and repair failed teardowns ([#29](https://github.com/codectl/swarmr-kubiq/issues/29)) ([64be328](https://github.com/codectl/swarmr-kubiq/commit/64be3286ca6d58c81878ed5f5f3332aafc17aa2d))
+
 ## [0.6.0](https://github.com/codectl/swarmr-kubiq/compare/v0.5.0...v0.6.0) (2026-11-12)
 
 
