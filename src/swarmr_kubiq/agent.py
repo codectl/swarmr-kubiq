@@ -31,11 +31,13 @@ from swarmr.core.team import RunContext, TeamBuild
 
 from swarmr_kubiq import prompts
 from swarmr_kubiq.catalogue import banner, profile_catalogue, render_facts
-from swarmr_kubiq.target import activate
+from swarmr_kubiq.docs import whats_new
+from swarmr_kubiq.target import activate, minor
 from swarmr_kubiq.tools import (
     AUTHOR_TOOLS,
     COMMANDER_TOOLS,
     CRITIC_TOOLS,
+    check_server,
     reset_staging,
     resume_staging,
 )
@@ -196,11 +198,16 @@ def build(run: RunContext) -> TeamBuild:
     """
     target = activate(dict(run.params))
     reset_staging()
+    check_server(target)
     resumed = resume_staging(target)
     model = build_model()
     catalogue = profile_catalogue(target)
+    version = target.version or ".".join(
+        map(str, minor(catalogue.cluster_version) if catalogue.cluster_version else ())
+    )
+    features = whats_new(version) if version else []
     facts = {
-        "author": render_facts(catalogue, target, resumed=resumed),
+        "author": render_facts(catalogue, target, resumed=resumed, features=features),
         "critic": render_facts(catalogue, target, drills=False),
     }
 
@@ -219,6 +226,9 @@ def build(run: RunContext) -> TeamBuild:
         # the slot the commander planned, the critic a batch of question
         # numbers. Rewriting either to the request would send the whole exam
         # brief to a role that works one question at a time.
-        middleware=[FirstRoundBriefing(exempt=_BRIEFED)],
+        # The commander's scratch filesystem is as empty as the specialists':
+        # left with the default tools it went looking for the checkout with
+        # glob, grep and ls, three denied turns at a time.
+        middleware=[_read_only_fs(), FirstRoundBriefing(exempt=_BRIEFED)],
     )
     return TeamBuild(graph=graph, banner=banner(catalogue, target))

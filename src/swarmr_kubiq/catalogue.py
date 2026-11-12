@@ -17,7 +17,14 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-from swarmr_kubiq.drill import Drill, DrillError, Exam, load_drill, load_exam
+from swarmr_kubiq.drill import (
+    GRADER_KINDS,
+    Drill,
+    DrillError,
+    Exam,
+    load_drill,
+    load_exam,
+)
 from swarmr_kubiq.kubiq_api import run
 from swarmr_kubiq.target import Target, TargetError, current, minor
 
@@ -336,6 +343,19 @@ def profile_catalogue(target: Target | None = None) -> Catalogue:
     return cat
 
 
+_KIND_ARM = re.compile(r'^\s*"(\w+)"\s*=>', re.MULTILINE)
+
+
+def grader_kinds(target: Target) -> frozenset[str]:
+    """The kinds kubiq resolves by bare name, read from the checkout's
+    `src/grader/kinds.rs`; the list `drill` ships with when that file is absent."""
+    try:
+        text = (target.kubiq / "src" / "grader" / "kinds.rs").read_text(encoding="utf-8")
+    except OSError:
+        return GRADER_KINDS
+    return frozenset(_KIND_ARM.findall(text)) or GRADER_KINDS
+
+
 _APK_ADD = re.compile(r"apk add\s+(?:--\S+\s+)*([^&\n]+)")
 
 
@@ -356,6 +376,7 @@ def render_facts(
     curriculum: bool = True,
     drills: bool = True,
     resumed: list[dict[str, Any]] | None = None,
+    features: list[dict[str, Any]] | None = None,
 ) -> str:
     """The facts block injected into a prompt.
 
@@ -413,6 +434,14 @@ def render_facts(
         for d in sorted(cat.drills, key=lambda d: (d.exam, d.order)):
             if d.id not in own:  # this exam's own questions are staged, not "existing"
                 lines.append(f"  - {d.id} · {d.topic} · {d.title}")
+    if features:
+        lines.append("")
+        lines.append(
+            "Recent features: docs sections stamped stable or beta since the "
+            "version to author against (section · URL for read_doc). A "
+            "recent-feature slot draws from this list:"
+        )
+        lines.extend(f"  - {f['title']} · {f['url']}" for f in features)
     if resumed:
         lines.append("")
         lines.append(

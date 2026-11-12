@@ -146,6 +146,9 @@ class FakeServer:
         self.calls: list[str] = []
         FakeServer.instances.append(self)
 
+    def teardown(self) -> dict[str, Any]:
+        return {"state": "idle"}
+
     def check(self) -> str:
         self.calls.append("check")
         return FakeServer.loader_problem

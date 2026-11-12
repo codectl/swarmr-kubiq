@@ -50,6 +50,7 @@ __all__ = [
     "Verdict",
     "prove_exam",
     "reclaim_sessions",
+    "repair_teardown",
     "settle_cap",
     "settle_setup",
     "solution_script",
@@ -563,6 +564,58 @@ def _hopeless(drill: Drill, report: dict[str, Any]) -> bool:
     return False
 
 
+def repair_teardown(client: kubiq_api.KubiqClient, drills: list[Drill]) -> list[str]:
+    """Clear a teardown kubiq could not finish, when the leftovers are ours.
+
+    kubiq latches a failed teardown and refuses every later session until an
+    operator acknowledges it: one drill whose `cleanup` names something kubiq
+    cannot delete would end the whole run. Each failure kubiq reports that
+    starts with a `cleanup` entry of `drills` is this exam's own object, so it
+    is deleted with kubectl and the failure acknowledged. Returns those
+    failures verbatim (they make the proof unproven). A failure that is not
+    ours is left alone and raised as `FatalError`.
+    """
+    state = client.teardown()
+    for _ in range(int(_TEARDOWN_WAIT / _TEARDOWN_POLL)):
+        if state.get("state") != "running":
+            break
+        _sleep(_TEARDOWN_POLL)
+        state = client.teardown()
+    if state.get("state") != "failed":
+        return []
+    error = str(state.get("error") or "")
+    failures = error.removeprefix("teardown incomplete: ").split("; ")
+    ours = {entry for d in drills for entry in d.cleanup}
+    repaired: list[str] = []
+    foreign: list[str] = []
+    for failure in failures:
+        entry = next((e for e in ours if failure.startswith(f"{e}:")), None)
+        if entry is None:
+            foreign.append(failure)
+            continue
+        kind, name = entry.rsplit("/", 1)
+        parts = kind.split("/")
+        resource = f"{parts[3]}.{parts[0]}" if len(parts) >= 4 else kind
+        rc, _, err = _run(
+            ["kubectl", "delete", resource, name, "--ignore-not-found", "--wait=false"],
+            timeout=60,
+        )
+        if rc != 0:
+            foreign.append(f"{failure} (kubectl delete failed: {err.strip()[-200:]})")
+        else:
+            repaired.append(failure)
+    if foreign:
+        raise FatalError(
+            "kubiq's teardown left objects this run cannot remove: "
+            + "; ".join(foreign)
+            + f". Delete them, then `curl -X DELETE {client.base_url}/api/teardown`. "
+            "Do not retry."
+        )
+    client.ack_teardown()
+    _progress(f"teardown repaired: {'; '.join(repaired)}")
+    return repaired
+
+
 def _results(report: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         {
@@ -579,8 +632,44 @@ def _tail(text: str, lines: int = 40, chars: int = 3000) -> str:
     return kept[-chars:]
 
 
+# Cluster-scoped kinds the cluster itself creates and removes while an exam
+# runs (an IPAddress per Service, a CSR per kubelet rotation, a snapshot
+# record): never an exam's leftover, always noise in the diff.
+_SYSTEM_KINDS = frozenset(
+    {
+        "componentstatuses",
+        "nodes",
+        "nodes.metrics.k8s.io",
+        "csinodes.storage.k8s.io",
+        "volumeattachments.storage.k8s.io",
+        "certificatesigningrequests.certificates.k8s.io",
+        "apiservices.apiregistration.k8s.io",
+        "ipaddresses.networking.k8s.io",
+        "etcdsnapshotfiles.k3s.cattle.io",
+    }
+)
+
+
+def _cluster_kinds() -> list[str]:
+    """Every cluster-scoped kind the cluster can list, so a leftover of a kind
+    nobody thought of (a VolumeAttributesClass, a PriorityClass) is still seen.
+    Empty when kubectl cannot say; the caller falls back to `TEARDOWN_KINDS`."""
+    rc, out, _ = _run(
+        ["kubectl", "api-resources", "--namespaced=false", "--verbs=list", "-o", "name"],
+        timeout=60,
+    )
+    if rc != 0:
+        return []
+    return [k for k in out.split() if k not in _SYSTEM_KINDS]
+
+
 def _snapshot() -> set[str]:
-    """Every cluster-scoped object of the kinds an exam could leave behind."""
+    """Every cluster-scoped object an exam could leave behind, as `kind/name`."""
+    kinds = _cluster_kinds()
+    if kinds:
+        rc, out, err = _run(["kubectl", "get", ",".join(kinds), "-o", "name"], timeout=60)
+        if rc == 0:
+            return {line.strip() for line in out.splitlines() if line.strip()}
     found: set[str] = set()
     for kind in TEARDOWN_KINDS:
         rc, out, err = _run(["kubectl", "get", kind, "-o", "name"], timeout=60)

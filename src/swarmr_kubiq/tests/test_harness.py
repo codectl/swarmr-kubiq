@@ -207,6 +207,8 @@ class FakeKubectl:
         if argv[:3] == ["kubectl", "get", "pods"]:
             assert argv[-2:] == ["-o", "json"]
             return 0, json.dumps({"items": self.pods}), ""
+        if argv[:2] == ["kubectl", "api-resources"]:
+            return 1, "", "no discovery in tests"  # the per-kind fallback is driven
         assert argv[:2] == ["kubectl", "get"] and argv[-2:] == ["-o", "name"]
         table = self.after if (self.after and self.session_created) else self.before
         return 0, "\n".join(table[argv[2]]) + "\n", ""

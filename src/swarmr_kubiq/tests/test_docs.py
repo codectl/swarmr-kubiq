@@ -157,12 +157,11 @@ def test_whats_new_dedupes_by_url_and_tags_query() -> None:
     c = _client(server)
     out = whats_new("1.34", c)
     assert [p["arguments"]["query"] for p in server.calls] == [
-        "Kubernetes 1.34 what's new",
-        "feature gate graduated 1.34",
-        "deprecated 1.34",
+        '"Stable since Kubernetes v1.34"',
+        '"Beta since Kubernetes v1.34"',
     ]
-    assert len(out) == 2  # three searches, same two URLs each time
-    assert out[0]["query"] == "Kubernetes 1.34 what's new"
+    assert len(out) == 2  # two searches, same two URLs each time
+    assert out[0]["query"] == '"Stable since Kubernetes v1.34"'
     assert {"title", "url", "snippet", "document_id", "query"} <= out[0].keys()
 
 
