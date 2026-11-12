@@ -61,9 +61,10 @@ PARAMS = (
     ),
     Param(
         "questions",
-        "How many questions the exam should have. Default 21 (CKAD/CKA) or 19 (CKS), "
-        "the smallest counts whose weights from 1, 2, 4 and 8 can carry every "
-        "curriculum share exactly.",
+        "How many questions the exam should have. Default 21 (CKAD/CKA) or 19 "
+        "(CKS). At least one per curriculum domain; a count too small for the "
+        "real exam's weights (1, 2, 4, 8) gets each domain's share split evenly "
+        "over its questions, so the exam still sums to 100.",
         required=False,
     ),
 )
