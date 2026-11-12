@@ -24,6 +24,7 @@ __all__ = [
     "CURRICULUM",
     "Catalogue",
     "banner",
+    "check_questions",
     "check_version",
     "cluster_version",
     "profile_catalogue",
@@ -300,9 +301,25 @@ def check_version(target: Target, cluster: str) -> None:
         )
 
 
+def check_questions(target: Target) -> None:
+    """Refuse a question count too small to give every curriculum domain a slot.
+
+    `plan_exam` would refuse every plan the commander could write; better to
+    stop before the first token than to let it try.
+    """
+    domains = sum(share > 0 for share, _ in CURRICULUM[target.certification].values())
+    if target.questions < domains:
+        raise TargetError(
+            f"questions={target.questions} cannot cover the {domains} "
+            f"{target.certification} curriculum domains: every domain needs at "
+            f"least one question. Ask for {domains} or more."
+        )
+
+
 def profile_catalogue(target: Target | None = None) -> Catalogue:
     """Read every drill and exam under the target checkout, and the cluster version."""
     t = target or current()
+    check_questions(t)
     cat = Catalogue(cluster_version=cluster_version())
     check_version(t, cat.cluster_version)
     for path in sorted((t.kubiq / "drills").rglob("*.yaml")):

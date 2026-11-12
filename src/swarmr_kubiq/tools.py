@@ -32,7 +32,7 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -65,6 +65,7 @@ __all__ = [
     "Slot",
     "allocate_weights",
     "catalogue_search",
+    "fewest_exam_slots",
     "finalize_exam",
     "grader_details",
     "plan_exam",
@@ -76,6 +77,7 @@ __all__ = [
     "reset_staging",
     "resume_staging",
     "search_docs",
+    "split_evenly",
     "stage_drill",
     "write_exam_file",
 ]
@@ -265,6 +267,35 @@ def allocate_weights(points: int, n: int) -> list[int]:
     return [w for w, c in zip(_WEIGHTS, counts, strict=True) for _ in range(c)]
 
 
+def fewest_exam_slots(shares: Iterable[int]) -> int:
+    """The smallest question count whose weights from {1, 2, 4, 8} can carry
+    every share exactly: each share's own minimum, summed. Any larger count
+    fits too, since a weight above 1 always splits into two halves."""
+    return sum(
+        next(k for k in range(1, share + 1) if _feasible(share, k) is not None)
+        for share in shares
+        if share > 0
+    )
+
+
+def split_evenly(points: int, n: int) -> list[int]:
+    """`n` weights summing exactly to `points`, as equal as integers allow,
+    descending: 25 over 2 is 13 + 12.
+
+    The short exam's allocation: with too few questions for the exam's own
+    weights, a domain's share still lands whole on its slots, so the exam sums
+    to 100 at any size. Raises `ValueError` when `n` slots cannot each be worth
+    a point.
+    """
+    if not 1 <= n <= points:
+        raise ValueError(
+            f"{points} points cannot be split over {n} slots; "
+            f"feasible slot counts: 1-{points}"
+        )
+    low, extra = divmod(points, n)
+    return [low + 1] * extra + [low] * (n - extra)
+
+
 def _span(values: list[int]) -> str:
     """`[4, 5, 6, 7]` → `4-7`; gaps are listed, e.g. `2, 4-7`."""
     if not values:
@@ -287,7 +318,10 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
     from the curriculum facts), its namespace and, when it must cover a recent
     feature, the Kubernetes version. Weights are NOT chosen by you: each
     domain's share of 100 points is split over its slots mechanically, so the
-    exam always sums to 100 and every domain with a share has a question.
+    exam always sums to 100 and every domain with a share has a question. At
+    full size the weights are the real exam's (1, 2, 4, 8); an exam with too
+    few questions for those splits each share evenly instead, and the result's
+    `weights` says which applied.
     Call it once before dispatching authors; calling it again with a changed
     plan rewrites the exam file around what is already staged.
 
@@ -379,6 +413,11 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
     missing = sorted(set(range(1, target.questions + 1)) - set(planned))
     if missing:
         raise ValueError(f"questions not planned: {', '.join(map(str, missing))}")
+    # Enough questions for the exam's own weights, or a short exam: decided by
+    # the count alone, so a full-size exam never slides into an even split
+    # because one domain was given too few slots.
+    short = target.questions < fewest_exam_slots(s for s, _ in curriculum.values())
+    split = split_evenly if short else allocate_weights
     domains: dict[str, dict[str, int]] = {}
     for domain, (share, _) in curriculum.items():
         numbers = sorted(n for n, s in planned.items() if s.domain == domain)
@@ -390,7 +429,7 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
         if not numbers:
             continue
         try:
-            weights = allocate_weights(share, len(numbers))
+            weights = split(share, len(numbers))
         except ValueError as exc:
             raise ValueError(f"domain {domain!r}: {exc}") from None
         for number, weight in zip(numbers, weights, strict=True):
@@ -409,6 +448,7 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
         {
             "kind": "plan",
             "slots": [asdict(planned[n]) for n in sorted(planned)],
+            "weights": "even split of each share (short exam)" if short else "1, 2, 4, 8",
             "weight_total": sum(s.weight for s in planned.values()),
             "domains": domains,
             "staged": sorted(_staged),

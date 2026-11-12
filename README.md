@@ -71,8 +71,11 @@ the current directory.
 checkout root holding `drills/` and `exams/`. `certification` is `CKAD`
 (default), `CKA` or `CKS`. `server` is the running kubiq, default
 `http://localhost:8080`. `version` is the Kubernetes minor to author against,
-refused above the cluster's. `questions` is the count, default 21 (19 for CKS);
-a count whose weights cannot mirror the curriculum shares is refused.
+refused above the cluster's. `questions` is the count, default 21 (19 for CKS)
+and at least one per curriculum domain. Below 17 (CKAD), 18 (CKA) or 19 (CKS)
+the real exam's weights of 1, 2, 4 and 8 cannot carry the shares, so each
+domain's share is split evenly over its questions instead: `--questions 5` on
+CKAD is five questions worth 20, 20, 15, 25 and 20.
 
 Tuning: `KUBECONFIG` (the cluster), `KUBIQ_SOLVE_BUDGET` (seconds a solution
 plus convergence may take, default 120), `KUBIQ_SETTLE_SECONDS` (grader

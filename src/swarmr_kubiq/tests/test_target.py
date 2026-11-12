@@ -159,3 +159,18 @@ def test_a_version_above_the_test_cluster_refuses_to_start(tmp_path: Path) -> No
     check_version(activate({"kubiq": str(tmp_path), "exam": "ckad-mock-7"}), "v1.30.0")
     with pytest.raises(TeamError, match="not a Kubernetes version"):
         activate({"kubiq": str(tmp_path), "exam": "ckad-mock-7", "version": "latest"})
+
+
+def test_too_few_questions_for_the_curriculum_refuses_to_start(tmp_path: Path) -> None:
+    from swarmr_kubiq.catalogue import check_questions
+
+    root = _checkout(tmp_path)
+    check_questions(
+        activate({"kubiq": str(root), "exam": "ckad-mock-7", "questions": "5"})
+    )
+    with pytest.raises(
+        TeamError, match=r"questions=4 cannot cover the 5 CKAD .* 5 or more"
+    ):
+        check_questions(
+            activate({"kubiq": str(root), "exam": "ckad-mock-7", "questions": "4"})
+        )

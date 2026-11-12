@@ -283,6 +283,57 @@ def test_plan_allocates_every_weight_and_the_exam_sums_to_100(checkout: Path) ->
     assert tools._plan[1].weight == 8 and tools._plan[1].competency
 
 
+def test_a_short_exam_splits_each_share_evenly_and_still_sums_to_100(
+    checkout: Path,
+) -> None:
+    """Below the count the exam's own weights need, a share lands whole on its
+    domain's slots; at or above it the exam weights stay mandatory."""
+    assert tools.split_evenly(25, 2) == [13, 12]
+    assert tools.split_evenly(20, 1) == [20]
+    with pytest.raises(ValueError, match="feasible slot counts: 1-10"):
+        tools.split_evenly(10, 11)
+    fewest = {
+        c: tools.fewest_exam_slots(s for s, _ in d.values())
+        for c, d in CURRICULUM.items()
+    }
+    assert fewest == {"CKAD": 17, "CKA": 18, "CKS": 19}
+
+    # Five questions, one per domain: each is worth its domain's whole share.
+    activate({"kubiq": str(checkout), "exam": "ckad-mock-7", "questions": "5"})
+    tools.reset_staging()
+    slots = [s for s in _slots() if s["question"] in (1, 4, 7, 11, 15)]
+    for number, slot in enumerate(slots, start=1):
+        slot["question"] = number
+    plan = _call(tools.plan_exam, slots=slots)
+    assert [s["weight"] for s in plan["slots"]] == [20, 20, 15, 25, 20]
+    assert plan["weight_total"] == 100 and "short exam" in plan["weights"]
+
+    # Every slot staged: the exam is complete, so kubiq gets no draft.
+    drills = [
+        _drill(),
+        _configmap(),
+        _configmap(id="cm-three", name="cfg3").replace("data.mode", "data.mode3"),
+        _drill(id="pod-four", name="four").replace(
+            "spec.containers[0].image", "spec.containers[0].name"
+        ),
+        _configmap(id="cm-five", name="cfg5").replace("data.mode", "data.mode5"),
+    ]
+    for number, drill in enumerate(drills, start=1):
+        _call(tools.stage_drill, drill_yaml=drill, question_index=number)
+    exam = load_exam(checkout / "exams/ckad-mock-7.yaml")
+    assert not exam.draft and [q.weight for q in exam.questions] == [20, 20, 15, 25, 20]
+
+    # Full size: a domain given too few slots is refused, never evened out.
+    activate({"kubiq": str(checkout), "exam": "ckad-mock-7", "questions": str(QUESTIONS)})
+    tools.reset_staging()
+    slots = _slots()
+    slots[7]["domain"] = "Application Design and Build"
+    slots[7]["competency"] = CURRICULUM["CKAD"]["Application Design and Build"][1][0]
+    assert "15 points cannot be split into 3 weights" in _error(
+        tools.plan_exam, slots=slots
+    )
+
+
 def test_plan_refuses_wrong_wording_numbers_and_namespaces(checkout: Path) -> None:
     slots = _slots()
     slots[0]["competency"] = "Build container images"

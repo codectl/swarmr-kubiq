@@ -235,8 +235,9 @@ The drill format (YAML, one document; copy the catalogue's shape exactly):
 
 Designing a question:
   * One mechanic per question, sized to its weight: weight 1-2 is a single
-    imperative command, 4 is a manifest with two or three things to get right,
-    8 is a multi-part task or a diagnosis with a trap in the setup.
+    imperative command, 3-4 is a manifest with two or three things to get
+    right, 5 or more is a multi-part task or a diagnosis with a trap in the
+    setup.
   * Prefer tasks that start from existing state ("the Deployment `x` is
     failing", "five Pods run in this namespace") over tasks that start from
     nothing; the setup is where the exam's difficulty lives.
@@ -415,8 +416,9 @@ Procedure:
        * domains with the fewest existing drills (the facts block counts them)
          get the most slots your shares allow. Give every domain with a share
          at least one slot.
-     The tool allocates the weights (1, 2, 4, 8 — the real exam's values)
-     per domain from the curriculum shares so they sum to exactly 100, and
+     The tool allocates the weights per domain from the curriculum shares so
+     they sum to exactly 100 — the real exam's values (1, 2, 4, 8) at full
+     size, an even split of each share on an exam too short for those — and
      refuses anything inconsistent: a competency not quoted verbatim, a
      topic that is not one word or composes to a namespace another exam
      uses, a missing domain, a domain
