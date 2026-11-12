@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/codectl/swarmr-kubiq/compare/v0.5.0...v0.6.0) (2026-11-12)
+
+
+### Features
+
+* improved performance and some other small improvments in token usage ([#27](https://github.com/codectl/swarmr-kubiq/issues/27)) ([a865ff6](https://github.com/codectl/swarmr-kubiq/commit/a865ff603188746a412601297ac7689d453f175a))
+
 ## [0.5.0](https://github.com/codectl/swarmr-kubiq/compare/v0.4.1...v0.5.0) (2026-11-12)
 
 
