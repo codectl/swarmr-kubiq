@@ -56,7 +56,7 @@ from swarmr_kubiq.drill import (
 from swarmr_kubiq.kubiq_api import FatalError, KubiqError
 from swarmr_kubiq.output import emit, guard
 from swarmr_kubiq.report_tool import FILE_REPORT_TOOL
-from swarmr_kubiq.target import Target, current
+from swarmr_kubiq.target import Target, TargetError, current
 
 __all__ = [
     "AUTHOR_TOOLS",
@@ -155,6 +155,11 @@ def resume_staging(target: Target) -> list[dict[str, Any]]:
     if not target.exam_file.is_file():
         return []
     exam = load_exam(target.exam_file, partial=True)
+    # An exam file larger than the run asks for is not this run's to continue:
+    # a plan of N slots has no place for question N+1, and the usual cause is
+    # an id that names a finished exam. Stop before the first token.
+    if len(exam.questions) > target.questions:
+        raise TargetError(_outgrown(target, len(exam.questions)))
     by_id: dict[str, Drill] = {}
     for path in target.drill_dir.glob("*.yaml"):
         try:
@@ -178,6 +183,9 @@ def resume_staging(target: Target) -> list[dict[str, Any]]:
         idx = drill.order % 100 if 1 <= drill.order % 100 <= 40 else pos
         if idx in _staged:
             idx = pos
+        if idx > target.questions:
+            reset_staging()
+            raise TargetError(_outgrown(target, idx))
         _staged[idx] = drill
         _plan[idx] = Slot(
             question=idx,
@@ -228,6 +236,15 @@ def resume_staging(target: Target) -> list[dict[str, Any]]:
         if not row["problem"] and (loader_everywhere or row["drill"] in loader_problem):
             row["problem"] = loader_problem
     return resumed
+
+
+def _outgrown(target: Target, found: int) -> str:
+    return (
+        f"exams/{target.exam}.yaml already exists with question {found} and this "
+        f"run asks for questions={target.questions}. To continue that exam pass "
+        f"questions={found} or more; to write a new one choose an exam id that "
+        "does not exist yet."
+    )
 
 
 def _feasible(points: int, n: int) -> tuple[int, int, int, int] | None:
@@ -570,6 +587,18 @@ def _cluster() -> Iterator[kubiq_api.KubiqClient]:
             raise
 
 
+def _loader_check() -> str:
+    """kubiq's loader verdict on the checkout, honouring a sticky FatalError."""
+    global _fatal
+    if _fatal is not None:
+        raise FatalError(_fatal)
+    try:
+        return _client().check()
+    except FatalError as exc:
+        _fatal = str(exc)
+        raise
+
+
 def _ensure_loaded(client: kubiq_api.KubiqClient) -> bool:
     """Reload kubiq's catalogue when the staged exam differs from what it last loaded."""
     global _loaded_digest
@@ -673,10 +702,12 @@ def search_docs(query: str) -> str:
     """Search the indexed kubernetes.io documentation.
 
     Returns ranked passages with their page URLs; read a whole page with
-    read_doc. Use it to ground a recent-feature question ("Kubernetes 1.34
-    what's new", "feature gate graduated 1.33") and to copy exact field names
-    a check must assert on. Only kubernetes.io is indexed: for Helm, cite the
-    helm.sh page the catalogue's Helm drills cite (read_drill one of them).
+    read_doc. Use it to copy exact field names a check must assert on, and to
+    ground a recent-feature question: pages carry the line "Feature state:
+    Stable since Kubernetes v1.34", so the quoted phrase `"since Kubernetes
+    v1.34"` lists what changed in that version; "what's new" finds nothing.
+    Only kubernetes.io is indexed: for Helm, cite the helm.sh page the
+    catalogue's Helm drills cite (read_drill one of them).
 
     Args:
         query: Free text, e.g. "sidecar containers restartPolicy Always".
@@ -865,7 +896,7 @@ def _refuse_unscoped_exec(drill: Drill, namespace: str) -> None:
             )
 
 
-# Staging mutates `_staged`, `_plan` and the exam file; four authors stage at
+# Staging mutates `_staged`, `_plan` and the exam file; several authors stage at
 # once, so the whole operation is one critical section.
 _staging_lock = threading.Lock()
 
@@ -931,8 +962,9 @@ def _stage_drill(drill_yaml: str, question_index: int) -> str:
     _staged[idx] = drill
     try:
         written = write_exam_file()
-        with _cluster() as client:
-            problem = client.check()
+        # Not under `_cluster_lock`: the loader check swaps nothing and kubiq
+        # allows it during a session, so staging never queues behind a proof.
+        problem = _loader_check()
         if problem:
             raise ValueError(
                 "kubiq itself refuses to load the staged files (this is the server's "
@@ -1030,32 +1062,31 @@ def _prove(idxs: list[int], skipped: list[int]) -> str:
     rows: list[dict[str, Any]] = []
     if idxs:
         with _cluster() as client:
-            reloaded = _ensure_loaded(client)
-            exam = Exam(
-                id=target.exam,
-                title=_exam_title(target),
-                certification=target.certification,
-                description="",
-                duration_minutes=_DURATION_MINUTES,
-                pass_percent=_PASS_PERCENT[target.certification],
-                questions=_questions(),
-                draft=True,
-            )
-            verdicts = harness.prove_exam(
-                client,
-                target,
-                exam,
-                list(_staged.values()),
-                indexes=[_api_index(i) for i in idxs],
-            )
+            # One consistent view of the staging: authors keep staging while
+            # the session runs, and a reload must never read a half-written
+            # exam nor the positions shift under the indexes proved here.
+            with _staging_lock:
+                reloaded = _ensure_loaded(client)
+                exam = Exam(
+                    id=target.exam,
+                    title=_exam_title(target),
+                    certification=target.certification,
+                    description="",
+                    duration_minutes=_DURATION_MINUTES,
+                    pass_percent=_PASS_PERCENT[target.certification],
+                    questions=_questions(),
+                    draft=True,
+                )
+                drills = list(_staged.values())
+                indexes = [_api_index(i) for i in idxs]
+                proved = {i: (_staged[i], _plan[i].namespace) for i in idxs}
+            verdicts = harness.prove_exam(client, target, exam, drills, indexes=indexes)
         for idx, verdict in zip(idxs, verdicts, strict=True):
             payload = verdict.to_json()
             payload["question"] = idx
             payload["server_reloaded"] = reloaded
             _verdicts[idx] = payload
-            proofs.save_proof(
-                target, proofs.proof_key(_staged[idx], _plan[idx].namespace), payload
-            )
+            proofs.save_proof(target, proofs.proof_key(*proved[idx]), payload)
             rows.append(_summary(payload))
     return emit(
         {
