@@ -56,7 +56,7 @@ from swarmr_kubiq.drill import (
 from swarmr_kubiq.kubiq_api import FatalError, KubiqError
 from swarmr_kubiq.output import emit, guard
 from swarmr_kubiq.report_tool import FILE_REPORT_TOOL
-from swarmr_kubiq.target import Target, TargetError, current
+from swarmr_kubiq.target import Target, TargetError, current, minor
 
 __all__ = [
     "AUTHOR_TOOLS",
@@ -447,6 +447,28 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
     missing = sorted(set(range(1, target.questions + 1)) - set(planned))
     if missing:
         raise ValueError(f"questions not planned: {', '.join(map(str, missing))}")
+    featured = {n: s.feature_version for n, s in planned.items() if s.feature_version}
+    if not 1 <= len(featured) <= 3:
+        raise ValueError(
+            f"{len(featured)} slots carry a `feature_version`; give it to 1 to 3 "
+            "slots (the version to author against in the facts block, else the "
+            "test cluster's), on competencies a recent feature can serve"
+        )
+    for number, version in featured.items():
+        try:
+            too_new = bool(cat.cluster_version) and minor(version) > minor(
+                cat.cluster_version
+            )
+        except TargetError:
+            raise ValueError(
+                f"question {number}: feature_version {version!r} is not a "
+                "Kubernetes version like 1.36"
+            ) from None
+        if too_new:
+            raise ValueError(
+                f"question {number}: feature_version {version} is above the test "
+                f"cluster's {cat.cluster_version}; it could not be proven"
+            )
     # Enough questions for the exam's own weights, or a short exam: decided by
     # the count alone, so a full-size exam never slides into an even split
     # because one domain was given too few slots.

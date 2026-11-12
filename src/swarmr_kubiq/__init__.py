@@ -59,6 +59,7 @@ TEAM = Team(
     report_tool="file_exam_report",
     orchestrator="commander",
     audit_agents=("critic",),
+    briefed_agents=("author",),
     digest=digest_result,
     is_error=is_tool_error,
     render_report=Lazy(f"{_MODULE}.report_tool:render_report_args"),

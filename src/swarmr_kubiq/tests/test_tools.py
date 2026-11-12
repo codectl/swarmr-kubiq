@@ -131,6 +131,7 @@ def _slots() -> list[dict[str, Any]]:
                     "topic": "q",
                 }
             )
+    slots[0]["feature_version"] = "1.36"
     return slots
 
 

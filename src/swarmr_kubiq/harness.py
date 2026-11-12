@@ -505,19 +505,62 @@ def _solve(
     while True:
         report = client.grade(sid, question_index)
         elapsed = time.monotonic() - started
-        if report.get("passed") or elapsed >= cap or _hopeless(report):
+        if report.get("passed") or elapsed >= cap or _hopeless(drill, report):
             report["solve_seconds"] = round(time.monotonic() - begun, 1)
             return rc, out, err, round(elapsed, 1), report, setup_settle
         _sleep(SETTLE_POLL)
 
 
-def _hopeless(report: dict[str, Any]) -> bool:
-    """A failing check that no amount of waiting repairs: its command is not
-    in the candidate's shell (exit 127). Polling it to the cap cost 90 s."""
-    return any(
-        not r.get("ok") and "exit code 127" in str(r.get("detail", ""))
-        for r in report.get("results") or []
-    )
+# Kinds whose `spec`, `data` and rules only a command writes: once the solution
+# has returned, a wrong value there stays wrong. Pods, Jobs, ReplicaSets, PVCs
+# and PVs are left out: a controller creates or rewrites them after the fact.
+_AUTHORED_KINDS = frozenset(
+    {
+        "Deployment",
+        "StatefulSet",
+        "DaemonSet",
+        "CronJob",
+        "ConfigMap",
+        "Secret",
+        "Service",
+        "NetworkPolicy",
+        "Ingress",
+        "Role",
+        "RoleBinding",
+        "ClusterRole",
+        "ClusterRoleBinding",
+    }
+)
+_AUTHORED_PATH = re.compile(r"^(spec|data|rules|subjects|roleRef|immutable)\b")
+
+
+def _hopeless(drill: Drill, report: dict[str, Any]) -> bool:
+    """A failing check that no amount of waiting repairs. Polling one to the
+    cap cost 90 s a time, with every other author's proof queued behind it.
+
+    Two cases only: an exec check whose command is not in the candidate's shell
+    (exit 127), and a check on a NAMED object of a kind nobody but the
+    candidate writes that fails on a field the solution should have set. A
+    selector (the list changes as Pods roll) and `status` are always waited for.
+    """
+    named = {
+        c.name
+        for c in drill.checks
+        if c.resource is not None
+        and c.resource.get("name")
+        and c.resource.get("kind") in _AUTHORED_KINDS
+    }
+    for r in report.get("results") or []:
+        if r.get("ok"):
+            continue
+        detail = str(r.get("detail", ""))
+        if "exit code 127" in detail:
+            return True
+        if r.get("name") in named and any(
+            _AUTHORED_PATH.match(line.strip()) for line in detail.splitlines()
+        ):
+            return True
+    return False
 
 
 def _results(report: dict[str, Any]) -> list[dict[str, Any]]:
