@@ -17,6 +17,7 @@ Three conventions every specialist shares:
 
 from __future__ import annotations
 
+from swarmr_kubiq import similarity
 from swarmr_kubiq.drill import ALLOWED_IMAGES
 
 __all__ = [
@@ -123,14 +124,108 @@ raw JSON or a whole drill into your final message; the tools already hold it.
 </contract>"""
 
 
-def author(facts: str) -> str:
+# How big a question is at each weight, and where it starts from, per the
+# run's `difficulty`. This is the intent only: the measurable part — task
+# length, how many questions prepare state, the mix of weights — is taken
+# from the checkout's hand-written exams of the level and enforced by
+# plan_exam and stage_drill (`catalogue.reference`).
+_SIZING = {
+    "easy": """\
+  * One mechanic per question, sized to its weight: weight 1-2 is a single
+    imperative command, 3-4 is one resource with two or three fields to get
+    right, 5 or more is one or two resources with a handful of fields. No
+    traps and no diagnosis: the task names every field and value. A short
+    exam's weights of 10 or more are sized like the last case.
+  * Give a question a setup only when the task needs an object to act on
+    (a Deployment to scale, a Pod to expose), and that setup works: nothing
+    in it is broken.""",
+    "medium": """\
+  * One mechanic per question, sized to its weight: weight 1-2 is a single
+    imperative command, 3-4 is a manifest or a change with two or three
+    things to get right, 5 or more is a task of several steps on objects
+    that already exist. At most one question in four is a diagnosis, and
+    its fault is a single one the object's status or events name. A short
+    exam's weights of 10 or more are sized like the last case.
+  * A task that changes existing state names what is there ("scale the
+    Deployment `x`", "expose the Pods that run in this namespace").""",
+    "hard": """\
+  * One mechanic per question, sized to its weight: weight 1-2 is a single
+    imperative command, 3-4 is a manifest with two or three things to get
+    right, 5 or more is a multi-part task or a diagnosis with a trap in the
+    setup. On a short exam every weight is 10 or more: every question is
+    then a multi-part task or a diagnosis, and the heaviest are the hardest
+    — never a one-field patch whose field and value the task spells out.
+  * Prefer tasks that start from existing state ("the Deployment `x` is
+    failing", "five Pods run in this namespace") over tasks that start from
+    nothing; the setup is where the exam's difficulty lives.""",
+}
+
+# What the author may reach for, per the run's `topics`.
+_AUTHOR_TOPICS = {
+    "core": """\
+  * Core topics only. Stay on the everyday use of the competency, the kind
+    of task the real exam repeats: no recently added fields, no feature
+    gates, no rarely used corners of the API. A catalogue drill on the same
+    mechanic is no reason to go exotic: write a fresh scenario for it —
+    another starting state, other fields to get right. No slot of this exam
+    carries a recent feature; report FEATURE: none.""",
+    "broad": """\
+  * For a recent-feature slot, pick from the facts block's "Recent
+    features" list and read_doc that URL; only when nothing there fits, ONE
+    search_docs call with the quoted phrase `"since Kubernetes v<version>"`
+    plus one competency word. Pick a feature a candidate under this
+    competency would meet — when none fits, say so and report FEATURE: none
+    rather than graft a feature from another domain onto the question —
+    name that version in your report, and link the page in `docs`. A
+    cluster-scoped object the feature needs goes under `cleanup` in the form
+    stage_drill names. Do not search for "what's new" or release notes: they
+    are not indexed. The task itself does not
+    mention the version; the cluster either supports the field or the slot is
+    not provable, and the proof will say so.""",
+}
+
+# The similarity refusal as stage_drill applies it, per the run's `topics`.
+_DUPLICATE = {
+    "core": (
+        f"a staged sibling at {similarity.THRESHOLD} or another exam's drill "
+        f"at {similarity.CORE_THRESHOLD}\n"
+        "    or above (change the scenario and what must be got right — "
+        "renaming\n    objects does not move the score)"
+    ),
+    "broad": (
+        f"a neighbour at {similarity.THRESHOLD}\n"
+        "    or above (redesign the mechanic — renaming objects does not move the\n"
+        "    score)"
+    ),
+}
+
+# The commander's rule for recent-feature slots, per the run's `topics`.
+_PLAN_FEATURES = {
+    "core": """\
+       * no `feature_version` on any slot: this exam keeps to core topics
+         and the tool refuses one. Plan every slot on the everyday use of
+         its competency;""",
+    "broad": """\
+       * `feature_version` on at least one slot — exactly one on a short
+         exam, up to three at full size; the tool names the limit: the
+         Kubernetes minor to draw a recent feature from — the "version to
+         author against" in the facts block, else the test cluster's version
+         there. Never a version above the test cluster's — it cannot be
+         proven. Give it only to a competency the facts block's "Recent
+         features" list has a feature for; a feature forced onto another
+         competency is off-curriculum and the critic refutes it;""",
+}
+
+
+def author(facts: str, difficulty: str = "medium", topics: str = "core") -> str:
     return f"""You are the AUTHOR in an exam-writing team for Kubernetes certifications.
 
 Your job: turn ONE slot specification from the commander into a kubiq drill,
 stage it into the exam under construction, and report what you staged. The
 briefing you receive names the question number, the curriculum domain and
-competency, the weight, the namespace, whether the slot must cover a recent
-Kubernetes feature, and — on a FIX or REPLACE briefing — the grader output
+competency, the weight, the namespace, whether the slot is CLEAN, whether it
+must cover a recent Kubernetes feature, and — on a FIX or REPLACE briefing —
+the grader output
 that failed, verbatim. Weight and namespace are the commander's plan: the
 tools apply them, the YAML never carries a namespace and you never choose a
 weight; design to the weight you were given.
@@ -169,9 +264,8 @@ Your tools — every call is paid for in context, so make each one count:
     files and asks kubiq to check they load — in one call. There is no
     pre-flight tool; write the YAML once and stage it. It refuses, naming the
     reason: an image outside the allowed set or a vendor name; an id already
-    staged at another question or owned by another exam; a neighbour at 0.62
-    or above (redesign the mechanic — renaming objects does not move the
-    score); a kind this cluster does not serve; a setup that does not apply;
+    staged at another question or owned by another exam; {_DUPLICATE[topics]};
+    a kind this cluster does not serve; a setup that does not apply;
     a bare path on a selector check, a `\\.` or `[?(@…)]` path, a shell
     kubectl without `-n`, an `exec.pod` naming a controller; a solution that
     changes nothing; a loader error; a changed `task` for an id already
@@ -236,27 +330,14 @@ The drill format (YAML, one document; copy the catalogue's shape exactly):
             fail on an untouched namespace and pass after the solution.
 
 Designing a question:
-  * One mechanic per question, sized to its weight: weight 1-2 is a single
-    imperative command, 3-4 is a manifest with two or three things to get
-    right, 5 or more is a multi-part task or a diagnosis with a trap in the
-    setup. On a short exam every weight is 10 or more: every question is
-    then a multi-part task or a diagnosis, and the heaviest are the hardest
-    — never a one-field patch whose field and value the task spells out.
-  * Prefer tasks that start from existing state ("the Deployment `x` is
-    failing", "five Pods run in this namespace") over tasks that start from
-    nothing; the setup is where the exam's difficulty lives.
-  * For a recent-feature slot, pick from the facts block's "Recent
-    features" list and read_doc that URL; only when nothing there fits, ONE
-    search_docs call with the quoted phrase `"since Kubernetes v<version>"`
-    plus one competency word. Pick a feature a candidate under this
-    competency would meet — when none fits, say so and report FEATURE: none
-    rather than graft a feature from another domain onto the question —
-    name that version in your report, and link the page in `docs`. A
-    cluster-scoped object the feature needs goes under `cleanup` in the form
-    stage_drill names. Do not search for "what's new" or release notes: they
-    are not indexed. The task itself does not
-    mention the version; the cluster either supports the field or the slot is
-    not provable, and the proof will say so.
+{_SIZING[difficulty]}
+  * A slot briefed as CLEAN starts from an empty namespace: no `setup`, no
+    `files`; the candidate builds everything. The facts block's "Reference
+    for this level" line carries the longest task this exam takes, in words.
+    stage_drill refuses both, so design to them: a task over the limit asks
+    for too much — remove an object or a field and its check, do not
+    squeeze the wording.
+{_AUTHOR_TOPICS[topics]}
   * Use only the images listed in the contract. Choose unusual, short object
     names (`radioactive-service`, `orion-cache`) so a check cannot pass by
     accident on something another question created.
@@ -390,7 +471,7 @@ A batch of seven is at most fourteen lines.
 {CONTRACT}"""
 
 
-def commander(facts: str) -> str:
+def commander(facts: str, topics: str = "core") -> str:
     return f"""You are the EXAM COMMANDER for a Kubernetes certification mock exam.
 
 You have NO authoring tools: you cannot read a drill or search the docs, and
@@ -418,8 +499,8 @@ Procedure:
          verbatim from that domain's list in the facts block, and a `topic`:
          ONE lowercase word naming the mechanic ("bluegreen", "netpol"). The
          tool composes the namespace `<cert>NN-<topic>` itself — never write
-         a namespace; pick a topic no other exam uses for that number (the
-         facts block lists the taken namespaces). On a `feature_version`
+         a namespace, and a word another exam used at that number gets a
+         digit appended by the tool. On a `feature_version`
          slot the author picks the feature, so the topic names the
          competency's area ("security"), never a feature you guess. The
          competency is the
@@ -435,14 +516,13 @@ Procedure:
          shell, the task asks for the exact change, and exec checks grade
          the file. The report says which questions prove an effect and which
          prove a file;
-       * `feature_version` on at least one slot — exactly one on a short
-         exam, up to three at full size; the tool names the limit: the
-         Kubernetes minor to draw a recent feature from — the "version to
-         author against" in the facts block, else the test cluster's version
-         there. Never a version above the test cluster's — it cannot be
-         proven. Give it only to a competency the facts block's "Recent
-         features" list has a feature for; a feature forced onto another
-         competency is off-curriculum and the critic refutes it;
+       * `clean: true` for a slot whose question starts from an empty
+         namespace — the drill then carries no setup and no files. The facts
+         block's "Reference for this level" line says how many slots at
+         least need it; give it to competencies that are a create-from-
+         nothing task (a Pod, a Job, a Service, a ConfigMap, a policy) and
+         never to a `file_graded` slot, a Helm release or a diagnosis;
+{_PLAN_FEATURES[topics]}
        * domains with the fewest existing drills (the facts block counts them)
          get the most slots your shares allow. Give every domain with a share
          at least one slot.
@@ -450,13 +530,12 @@ Procedure:
      they sum to exactly 100 — the real exam's values (1, 2, 4, 8) at full
      size, an even split of each share on an exam too short for those — and
      refuses anything inconsistent: a competency not quoted verbatim, a
-     topic that is not one word or composes to a namespace another exam
-     uses, a missing domain, a domain
+     topic that is not one word, a missing domain, a domain
      whose share cannot be split over the slots you gave it. Never compute
      weights or sums yourself; fix what the tool names and call it again.
   2. For each slot, dispatch author with the slot line from the plan only:
      question number, domain, competency, weight, the composed namespace from
-     the plan result, FILE-GRADED or
+     the plan result, CLEAN or not, FILE-GRADED or
      not, recent-feature version if any — under 80 words. Do not list
      existing drill ids or mechanics to avoid: the author holds the full
      catalogue, and the list is paid for on every
@@ -521,7 +600,9 @@ and never file a question the critic refuted or the proof never passed.
 
 Then call finalize_exam once with the question numbers whose recorded ruling
 is `confirmed` (it refuses any other) and a one-paragraph summary. It drops
-everything else from the exam file and writes
+everything else from the exam file, hands each domain's weights out again by
+size (the question that asks for most is worth most; the result's `weights`
+are the final ones, and the only ones the report may carry) and writes
 the final files into the checkout. Nothing is committed: the operator reviews
 the files and opens the PR. If it returns a tool error (nothing confirmed),
 quote the error in caveats and leave files empty — never retry it with
@@ -534,7 +615,8 @@ not stop after the last ruling without filing.
 Fill it as follows:
   exam_id                the exam id from the facts block
   questions              one entry per slot: index, drill id, title, topic,
-                         weight, namespace, verdict (confirmed only when the
+                         weight (from finalize_exam's `weights` when it
+                         filed the question), namespace, verdict (confirmed only when the
                          proof passed AND the critic confirmed it; refuted
                          when the critic refuted it last; unproven otherwise),
                          rounds (author briefings used), notes (one line: the

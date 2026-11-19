@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,11 +32,13 @@ from swarmr_kubiq.target import Target, TargetError, current, minor
 __all__ = [
     "CURRICULUM",
     "Catalogue",
+    "Reference",
     "banner",
     "check_questions",
     "check_version",
     "cluster_version",
     "profile_catalogue",
+    "reference",
     "render_facts",
 ]
 
@@ -273,6 +276,70 @@ class Catalogue:
         return c
 
 
+@dataclass(frozen=True, slots=True)
+class Reference:
+    """What the hand-written exams of one level measure, so a generated exam of
+    that level can be held to them instead of to numbers chosen here."""
+
+    exams: tuple[str, ...]
+    # Three quarters of the reference tasks are at most this many words.
+    task_words: int
+    # Share of the reference questions that prepare state (a setup or files).
+    prepared_share: float
+    # Share of the reference questions worth 1 or 2 points.
+    small_share: float
+
+    def clean_slots(self, questions: int) -> int:
+        """How many of `questions` must start from an empty namespace."""
+        return questions - int(self.prepared_share * questions + 0.5)
+
+    def small_slots(self, questions: int) -> int:
+        """How many of `questions` are worth 1 or 2 points."""
+        return int(self.small_share * questions + 0.5)
+
+
+def _measure(exams: list[Exam], drills: dict[str, Drill]) -> Reference | None:
+    """The measure of `exams`, or None when they ask too little to measure."""
+    asked = [
+        (q.weight, drills[q.drill])
+        for e in exams
+        for q in e.questions
+        if q.drill in drills
+    ]
+    if len(asked) < 2:
+        return None
+    words = [len(d.task.split()) for _, d in asked]
+    return Reference(
+        exams=tuple(e.id for e in exams),
+        task_words=round(statistics.quantiles(words, n=4, method="inclusive")[2]),
+        prepared_share=sum(bool(d.setup or d.files) for _, d in asked) / len(asked),
+        small_share=sum(w <= 2 for w, _ in asked) / len(asked),
+    )
+
+
+def reference(cat: Catalogue, target: Target) -> Reference | None:
+    """The measure of the checkout's hand-written exams of the run's
+    difficulty; None when it has none to compare with.
+
+    The run's own certification is the yardstick when it has such exams; a
+    certification without any borrows the level from the others, because what
+    is measured — how long a task is, how many questions prepare state, how
+    many are small — is the level, not the subject. Hand-written is an exam
+    file without `generated_by`: an exam this team wrote is never a yardstick.
+    """
+    level = [
+        e
+        for e in cat.exams
+        if not e.generated_by
+        and not e.draft
+        and e.id != target.exam
+        and e.difficulty == target.difficulty
+    ]
+    own = [e for e in level if e.certification.upper() == target.certification]
+    drills = {d.id: d for d in cat.drills}
+    return _measure(own, drills) or _measure(level, drills)
+
+
 def cluster_version() -> str:
     """The server version of the cluster `KUBECONFIG` points at, e.g. `v1.35.5+k3s1`.
 
@@ -369,6 +436,23 @@ def shell_tools(target: Target) -> list[str]:
     return [pkg for line in _APK_ADD.findall(text) for pkg in line.split()]
 
 
+def _reference_fact(cat: Catalogue, target: Target) -> str:
+    """The facts line naming what the level is measured against."""
+    ref = reference(cat, target)
+    if ref is None:
+        return (
+            f"Reference for this level: none (the checkout has no hand-written "
+            f"{target.difficulty} exam); no size limit applies."
+        )
+    return (
+        f"Reference for this level: the hand-written {target.difficulty} exams "
+        f"{', '.join(ref.exams)}. The tools hold this exam to them: a task of at "
+        f"most {ref.task_words} words (stage_drill), and at least "
+        f"{ref.clean_slots(target.questions)} of {target.questions} slots `clean` — "
+        "an empty namespace, no setup, no files (plan_exam)."
+    )
+
+
 def render_facts(
     cat: Catalogue,
     target: Target | None = None,
@@ -377,6 +461,7 @@ def render_facts(
     drills: bool = True,
     resumed: list[dict[str, Any]] | None = None,
     features: list[dict[str, Any]] | None = None,
+    fewest_slots: dict[str, int] | None = None,
 ) -> str:
     """The facts block injected into a prompt.
 
@@ -394,25 +479,11 @@ def render_facts(
         f"Test cluster: {cat.cluster_version or 'unknown (kubectl did not answer)'}",
         "Kubernetes version to author against: "
         + (t.version or "not specified; use the cluster's version"),
+        f"Difficulty: {t.difficulty} · Topics: {t.topics}",
+        _reference_fact(cat, t),
         "Candidate shell tools (exec checks and solutions run there; nothing "
         "else is installed): " + (", ".join(shell_tools(t)) or "unknown"),
         f"Existing drills: {len(cat.drills)} across {len(cat.exams)} exams",
-        "Namespaces other exams already use (plan_exam refuses them; choose a "
-        "unique namespace): "
-        + (
-            ", ".join(
-                sorted(
-                    {
-                        ns
-                        for e in cat.exams
-                        if e.id != t.exam
-                        for q in e.questions
-                        if (ns := q.namespace)
-                    }
-                )
-            )
-            or "none"
-        ),
         "",
         f"{t.certification} curriculum (CNCF): domain, share of the exam, and the "
         "competencies it covers. Every question must exercise one of these "
@@ -421,14 +492,24 @@ def render_facts(
     if curriculum:
         for dom, (pct, skills) in CURRICULUM.get(t.certification, {}).items():
             have = cat.domain_counts(t.certification).get(dom, 0)
-            lines.append(f"  - {dom}: {pct}%  (existing drills in this domain: {have})")
+            least = (fewest_slots or {}).get(dom)
+            lines.append(
+                f"  - {dom}: {pct}%  (existing drills in this domain: {have}"
+                + (f"; plan at least {least} questions here" if least else "")
+                + ")"
+            )
             lines.extend(f"      * {skill}" for skill in skills)
     else:
         del lines[-2:]
     if drills:
         lines.append("")
         lines.append(
-            "Existing drills (id · topic · title) — an exam must not repeat these:"
+            "Existing drills (id · topic · title) — "
+            + (
+                "never copy one; a new scenario on the same mechanic is fine:"
+                if t.topics == "core"
+                else "an exam must not repeat these:"
+            )
         )
         own = {q.drill for e in cat.exams if e.id == t.exam for q in e.questions}
         for d in sorted(cat.drills, key=lambda d: (d.exam, d.order)):

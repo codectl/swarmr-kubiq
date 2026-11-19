@@ -28,7 +28,7 @@ teams exam_author --exam ckad-mock-7 --version 1.35 "create a new CKAD mock exam
 ```
 
 Over MCP the tool is
-`start_exam_author(request, exam, kubiq?, certification?, server?, version?, questions?)`.
+`start_exam_author(request, exam, kubiq?, certification?, server?, version?, questions?, difficulty?, topics?)`.
 
 ## The proof
 
@@ -47,7 +47,7 @@ so a rerun proves and judges only what changed; a rerun on an unchanged exam is
 a report and nothing else.
 
 What a model cannot be trusted to get right, a tool refuses: weights that do not
-mirror the curriculum shares, a namespace another exam uses, a drill that is a
+mirror the curriculum shares, a drill that is a
 rewording of one in the catalogue or of a sibling, a kind the cluster does not
 serve, a check that can never pass, a solution that changes nothing, a private
 key, a changed task on a fix round. The author fixes what the tool names.
@@ -60,32 +60,6 @@ key, a changed task on a fix round. The author fixes what the tool names.
 - `kubectl` on PATH, pointed at the cluster kubiq provisions sessions on.
 - `lodestar` (MCP) for the Kubernetes documentation; unreachable degrades to
   empty searches, never to a failure.
-
-## Arguments
-
-Per call, as `--flags` on the CLI or arguments of the MCP tool. Nothing about
-the target comes from the environment except the checkout, which defaults to
-the current directory.
-
-`exam` is required: the id to author, which must not exist yet. `kubiq` is the
-checkout root holding `drills/` and `exams/`. `certification` is `CKAD`
-(default), `CKA` or `CKS`. `server` is the running kubiq, default
-`http://localhost:8080`. `version` is the Kubernetes minor to author against,
-refused above the cluster's. `questions` is the count, default 21 (19 for CKS)
-and at least one per curriculum domain. Below 17 (CKAD), 18 (CKA) or 19 (CKS)
-the real exam's weights of 1, 2, 4 and 8 cannot carry the shares, so each
-domain's share is split evenly over its questions instead: `--questions 5` on
-CKAD is five questions worth 20, 20, 15, 25 and 20.
-
-Tuning: `KUBECONFIG` (the cluster), `KUBIQ_SOLVE_BUDGET` (seconds a solution
-plus convergence may take, default 120), `KUBIQ_SETTLE_SECONDS` (grader
-convergence cap, default 90), `XDG_CACHE_HOME` (where proofs live),
-`LODESTAR_COMMAND` / `LODESTAR_URL`. Model credentials come from `swarmr`
-(`KIMI_*`).
-
-A session the team did not open is never touched: a reload or a proof is refused
-while one exists. The report names the files and the `git` and `gh` commands to
-open the PR; it runs neither.
 
 ## References
 

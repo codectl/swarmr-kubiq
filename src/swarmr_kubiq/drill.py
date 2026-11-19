@@ -29,6 +29,7 @@ __all__ = [
     "Question",
     "dump_drill",
     "dump_exam",
+    "images_in",
     "load_drill",
     "load_exam",
     "parse_drill",
@@ -94,6 +95,19 @@ class DrillError(ValueError):
     """A drill or exam file kubiq would refuse, with the field named."""
 
 
+def images_in(text: str) -> list[str]:
+    """Container images a manifest or command text references.
+
+    Both manifest lines (`image: x`) and imperative flags (`--image=x`,
+    `--image x`) count; a drill can introduce an image either way.
+    """
+    found = re.findall(
+        r"(?:image:\s*|--image[= ])[\"']?([A-Za-z0-9][\w./:-]*)[\"']?", text
+    )
+    # Helm templates reference values (`{{ .Values.image }}`), not images.
+    return sorted({f for f in found if not f.startswith("{{") and not f.endswith(":")})
+
+
 @dataclass(slots=True)
 class Check:
     name: str
@@ -151,19 +165,16 @@ class Drill:
         return out
 
     def images(self) -> list[str]:
-        """Container images referenced in setup, files and solution.
+        """Container images referenced in setup, files and solution."""
+        return images_in(
+            "\n".join([self.setup or "", self.solution, *self.files.values()])
+        )
 
-        Both manifest lines (`image: x`) and imperative flags (`--image=x`,
-        `--image x`) count; a drill can introduce an image either way.
-        """
-        text = "\n".join([self.setup or "", self.solution, *self.files.values()])
-        found = re.findall(
-            r"(?:image:\s*|--image[= ])[\"']?([A-Za-z0-9][\w./:-]*)[\"']?", text
-        )
-        # Helm templates reference values (`{{ .Values.image }}`), not images.
-        return sorted(
-            {f for f in found if not f.startswith("{{") and not f.endswith(":")}
-        )
+    def typed_images(self) -> list[str]:
+        """Images only the solution names: nothing prepared carries them, so
+        the candidate has to type them and the task has to state them."""
+        prepared = set(images_in("\n".join([self.setup or "", *self.files.values()])))
+        return [i for i in images_in(self.solution) if i not in prepared]
 
     def manifest_kinds(self) -> set[tuple[str, str]]:
         """Every (apiVersion, Kind) applied by setup, solution or files, plus
@@ -251,6 +262,7 @@ class Exam:
     draft: bool = False
     planned_questions: int = 0
     generated_by: str = ""
+    difficulty: str = ""
 
     def to_yaml(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -267,6 +279,8 @@ class Exam:
             out["planned_questions"] = self.planned_questions
         if self.generated_by:
             out["generated_by"] = self.generated_by
+        if self.difficulty:
+            out["difficulty"] = self.difficulty
         out["questions"] = [q.to_yaml() for q in self.questions]
         return out
 
@@ -586,6 +600,7 @@ def parse_exam(text: str, where: str = "<exam>", *, partial: bool = False) -> Ex
         draft=bool(data.get("draft", False)),
         planned_questions=int(data.get("planned_questions") or 0),
         generated_by=str(data.get("generated_by") or ""),
+        difficulty=str(data.get("difficulty") or ""),
     )
     validate_exam(exam, where, partial=partial)
     return exam

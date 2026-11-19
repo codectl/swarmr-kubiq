@@ -46,6 +46,7 @@ from swarmr_kubiq.catalogue import (
     Catalogue,
     grader_kinds,
     profile_catalogue,
+    reference,
 )
 from swarmr_kubiq.drill import (
     Drill,
@@ -72,6 +73,7 @@ __all__ = [
     "catalogue_search",
     "check_server",
     "feature_slots",
+    "fewest_domain_slots",
     "fewest_exam_slots",
     "finalize_exam",
     "grader_details",
@@ -119,6 +121,8 @@ class Slot:
     namespace: str | None
     file_graded: bool = False
     feature_version: str = ""
+    # Starts from an empty namespace: the drill carries no setup and no files.
+    clean: bool = False
 
 
 # The plan. Question number → slot; weights and namespaces live here only.
@@ -293,34 +297,39 @@ def check_server(target: Target) -> None:
         )
 
 
-def _feasible(points: int, n: int) -> tuple[int, int, int, int] | None:
+def _feasible(
+    points: int, n: int, *, small: bool = False
+) -> tuple[int, int, int, int] | None:
     """Counts (c8, c4, c2, c1) of each weight for `n` slots worth `points`:
-    fewest 1s, then fewest 2s, then most 8s. None when impossible."""
+    fewest 1s, then fewest 2s, then most 8s; with `small`, the most 1- and
+    2-point questions, then the fewest 1s. None when impossible."""
     best: tuple[int, int, int, int] | None = None
-    best_key: tuple[int, int, int] | None = None
+    best_key: tuple[int, ...] | None = None
     for c8 in range(n + 1):
         for c4 in range(n - c8 + 1):
             for c2 in range(n - c8 - c4 + 1):
                 c1 = n - c8 - c4 - c2
                 if 8 * c8 + 4 * c4 + 2 * c2 + c1 != points:
                     continue
-                key = (c1, c2, -c8)
+                key = (-(c1 + c2), c1) if small else (c1, c2, -c8)
                 if best_key is None or key < best_key:
                     best, best_key = (c8, c4, c2, c1), key
     return best
 
 
-def allocate_weights(points: int, n: int) -> list[int]:
+def allocate_weights(points: int, n: int, *, small: bool = False) -> list[int]:
     """`n` weights from {1, 2, 4, 8} summing exactly to `points`, descending.
 
     Chosen by brute force over the counts of each weight: the fewest 1-point
     questions, then the fewest 2-point ones, then the most 8-point ones, so a
-    domain's share lands on substantial questions. Raises `ValueError` naming
-    the slot counts that could carry `points` when `n` cannot.
+    domain's share lands on substantial questions. `small` is the easy exam's
+    choice instead: as many 1- and 2-point questions as the share allows, the
+    way the hand-written easy exams are cut. Raises `ValueError` naming the
+    slot counts that could carry `points` when `n` cannot.
     """
     if n < 1 or points < 1:
         raise ValueError(f"{points} points over {n} slots: both must be positive")
-    counts = _feasible(points, n)
+    counts = _feasible(points, n, small=small)
     if counts is None:
         feasible = [k for k in range(1, points + 1) if _feasible(points, k) is not None]
         raise ValueError(
@@ -330,15 +339,25 @@ def allocate_weights(points: int, n: int) -> list[int]:
     return [w for w, c in zip(_WEIGHTS, counts, strict=True) for _ in range(c)]
 
 
+def _fewest_slots(share: int) -> int:
+    """The fewest weights from {1, 2, 4, 8} that sum exactly to `share`."""
+    return next(k for k in range(1, share + 1) if _feasible(share, k) is not None)
+
+
 def fewest_exam_slots(shares: Iterable[int]) -> int:
     """The smallest question count whose weights from {1, 2, 4, 8} can carry
     every share exactly: each share's own minimum, summed. Any larger count
     fits too, since a weight above 1 always splits into two halves."""
-    return sum(
-        next(k for k in range(1, share + 1) if _feasible(share, k) is not None)
-        for share in shares
-        if share > 0
-    )
+    return sum(_fewest_slots(share) for share in shares if share > 0)
+
+
+def fewest_domain_slots(target: Target) -> dict[str, int]:
+    """Per domain, the fewest questions `plan_exam` accepts for this run: what
+    the domain's share needs in exam weights, or 1 on a short exam, where the
+    share is split evenly. For the commander's facts, so the first plan fits."""
+    shares = {d: s for d, (s, _) in CURRICULUM[target.certification].items() if s > 0}
+    short = target.questions < fewest_exam_slots(shares.values())
+    return {d: 1 if short else _fewest_slots(s) for d, s in shares.items()}
 
 
 def split_evenly(points: int, n: int) -> list[int]:
@@ -396,8 +415,10 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
             `<cert>NN-<topic>`, "ckad07-bluegreen", and must not be used by
             another exam), optional `file_graded` (true when the cluster cannot
             host the competency and the question is graded from files in the
-            candidate's shell) and `feature_version` (e.g. "1.35" for a
-            recent-feature slot).
+            candidate's shell), `feature_version` (e.g. "1.35" for a
+            recent-feature slot) and `clean` (true when the question starts
+            from an empty namespace: its drill may carry no setup and no
+            files; the facts block says how many slots at least need it).
     """
     target = current()
     curriculum = CURRICULUM[target.certification]
@@ -411,26 +432,44 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
     }
     planned: dict[int, Slot] = {}
     seen_ns: dict[str, int] = {}
+    # Every problem of the plan is reported in ONE refusal: the commander
+    # resends the whole plan on each call, so a refusal per mistake costs a
+    # full plan per mistake.
+    problems: list[str] = []
+    # False once a slot could not be placed at a number and in a domain: the
+    # counts per domain are then not the commander's, and judging them would
+    # report mistakes it did not make.
+    countable = True
     for raw in slots:
         if not isinstance(raw, dict):
-            raise ValueError(f"each slot must be a mapping, not {raw!r}")
+            problems.append(f"each slot must be a mapping, not {raw!r}")
+            countable = False
+            continue
         try:
             number = int(raw["question"])
         except (KeyError, TypeError, ValueError):
-            raise ValueError(f"slot {raw!r} needs an integer `question`") from None
+            problems.append(f"slot {raw!r} needs an integer `question`")
+            countable = False
+            continue
         if not 1 <= number <= target.questions:
-            raise ValueError(f"question {number} is outside 1..{target.questions}")
+            problems.append(f"question {number} is outside 1..{target.questions}")
+            countable = False
+            continue
         if number in planned:
-            raise ValueError(f"question {number} is planned twice")
+            problems.append(f"question {number} is planned twice")
+            countable = False
+            continue
         domain = str(raw.get("domain", "")).strip()
         if domain not in curriculum:
-            raise ValueError(
+            problems.append(
                 f"question {number}: domain {domain!r} is not one of: "
                 + "; ".join(curriculum)
             )
+            countable = False
+            continue
         competency = str(raw.get("competency", "")).strip()
         if competency not in curriculum[domain][1]:
-            raise ValueError(
+            problems.append(
                 f"question {number}: competency {competency!r} is not verbatim one of "
                 f"{domain}'s: " + " | ".join(curriculum[domain][1])
             )
@@ -442,28 +481,34 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
         given = str(raw.get("namespace", "") or "").strip().lower()
         if not topic and given.startswith(prefix):
             topic = given[len(prefix) :]
+        namespace: str | None = prefix + topic
         if not _TOPIC.match(topic):
-            raise ValueError(
+            problems.append(
                 f"question {number}: `topic` must be one lowercase word of letters "
                 f"and digits (the namespace becomes {prefix}<topic>), got "
                 f"{raw.get('topic', raw.get('namespace'))!r}"
             )
-        namespace = prefix + topic
-        if given and given != namespace:
-            raise ValueError(
+            namespace = None
+        elif given and given != namespace:
+            problems.append(
                 f"question {number}: namespace {given!r} does not match the composed "
                 f"{namespace!r}; give `topic` only"
             )
-        if namespace in seen_ns:
-            raise ValueError(
+        elif namespace in seen_ns:
+            problems.append(
                 f"question {number}: namespace {namespace!r} is also question "
                 f"{seen_ns[namespace]}'s"
             )
-        if namespace in taken:
-            raise ValueError(
-                f"question {number}: namespace {namespace!r} belongs to another exam"
-            )
-        seen_ns[namespace] = number
+        else:
+            # A name another exam holds is not the commander's mistake to fix
+            # at a full plan per try: the tool takes the next free one
+            # (`ckad08-helm2`). The smallest free suffix, so planning again
+            # composes the same namespace.
+            suffix = 2
+            while namespace in taken:
+                namespace = f"{prefix}{topic}{suffix}"
+                suffix += 1
+            seen_ns[namespace] = number
         planned[number] = Slot(
             question=number,
             domain=domain,
@@ -472,14 +517,38 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
             namespace=namespace,
             file_graded=bool(raw.get("file_graded", False)),
             feature_version=str(raw.get("feature_version", "") or "").strip(),
+            clean=bool(raw.get("clean", False)),
         )
+        if planned[number].clean and planned[number].file_graded:
+            problems.append(
+                f"question {number}: a `file_graded` slot places files in the "
+                "shell and cannot be `clean`"
+            )
     missing = sorted(set(range(1, target.questions + 1)) - set(planned))
-    if missing:
-        raise ValueError(f"questions not planned: {', '.join(map(str, missing))}")
+    if missing and countable:
+        problems.append(f"questions not planned: {', '.join(map(str, missing))}")
+    ref = reference(cat, target)
+    if ref is not None and countable:
+        need = ref.clean_slots(target.questions)
+        clean = sum(s.clean for s in planned.values())
+        if clean < need:
+            problems.append(
+                f"{clean} slots are `clean`; this {target.difficulty} exam needs at "
+                f"least {need} of {target.questions} (the hand-written "
+                f"{target.difficulty} exams prepare state for "
+                f"{ref.prepared_share:.0%} of their questions). Mark the slots "
+                "whose competency is a create-from-nothing task"
+            )
     featured = {n: s.feature_version for n, s in planned.items() if s.feature_version}
     most = feature_slots(target.questions)
-    if not 1 <= len(featured) <= most:
-        raise ValueError(
+    if target.topics == "core":
+        if featured:
+            problems.append(
+                f"{len(featured)} slots carry a `feature_version`; a core-topics "
+                "exam takes none"
+            )
+    elif not 1 <= len(featured) <= most:
+        problems.append(
             f"{len(featured)} slots carry a `feature_version`; a "
             f"{target.questions}-question exam takes "
             + ("exactly 1" if most == 1 else f"1 to {most}")
@@ -492,12 +561,13 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
                 cat.cluster_version
             )
         except TargetError:
-            raise ValueError(
+            problems.append(
                 f"question {number}: feature_version {version!r} is not a "
                 "Kubernetes version like 1.36"
-            ) from None
+            )
+            continue
         if too_new:
-            raise ValueError(
+            problems.append(
                 f"question {number}: feature_version {version} is above the test "
                 f"cluster's {cat.cluster_version}; it could not be proven"
             )
@@ -505,24 +575,52 @@ def plan_exam(slots: list[dict[str, Any]]) -> str:
     # the count alone, so a full-size exam never slides into an even split
     # because one domain was given too few slots.
     short = target.questions < fewest_exam_slots(s for s, _ in curriculum.values())
-    split = split_evenly if short else allocate_weights
     domains: dict[str, dict[str, int]] = {}
-    for domain, (share, _) in curriculum.items():
+    allocated: dict[str, tuple[list[int], list[int]]] = {}
+    for domain, (share, _) in curriculum.items() if countable else ():
         numbers = sorted(n for n, s in planned.items() if s.domain == domain)
         if share > 0 and not numbers:
-            raise ValueError(
+            problems.append(
                 f"domain {domain!r} has a {share} % share and no slot; every domain "
                 "with a share needs at least one question"
             )
         if not numbers:
             continue
         try:
-            weights = split(share, len(numbers))
+            weights = (
+                split_evenly(share, len(numbers))
+                if short
+                else allocate_weights(share, len(numbers))
+            )
         except ValueError as exc:
-            raise ValueError(f"domain {domain!r}: {exc}") from None
+            problems.append(f"domain {domain!r}: {exc}")
+            continue
+        allocated[domain] = (numbers, weights)
+        domains[domain] = {"share": share, "slots": len(numbers), "points": share}
+    # The level's own mix: domains are recut into more 1- and 2-point questions,
+    # in curriculum order, until the exam has as many as the hand-written exams
+    # of this level do. Without a reference the cut above stands.
+    if ref is not None and not short:
+        want = ref.small_slots(target.questions)
+        have = sum(w <= 2 for _, weights in allocated.values() for w in weights)
+        for domain, (numbers, weights) in allocated.items():
+            if have >= want:
+                break
+            recut = allocate_weights(curriculum[domain][0], len(numbers), small=True)
+            gain = sum(w <= 2 for w in recut) - sum(w <= 2 for w in weights)
+            if gain > 0 and abs(have + gain - want) < abs(have - want):
+                allocated[domain] = (numbers, recut)
+                have += gain
+    for numbers, weights in allocated.values():
         for number, weight in zip(numbers, weights, strict=True):
             planned[number].weight = weight
-        domains[domain] = {"share": share, "slots": len(numbers), "points": share}
+    if len(problems) == 1:
+        raise ValueError(problems[0])
+    if problems:
+        raise ValueError(
+            f"{len(problems)} problems in this plan; fix ALL of them, then call "
+            "plan_exam once:\n" + "\n".join(f"  - {p}" for p in problems)
+        )
     # A staged question whose namespace moves was proved somewhere else.
     for idx in _staged:
         old = _plan.get(idx)
@@ -627,6 +725,7 @@ def write_exam_file() -> list[Path]:
         draft=len(questions) < target.questions,
         planned_questions=target.questions,
         generated_by="swarmr-kubiq",
+        difficulty=target.difficulty,
     )
     return harness.stage_exam(target, exam, list(_staged.values()))
 
@@ -886,7 +985,13 @@ def _nearest(drill: Drill, idx: int, cat: Catalogue, target: Target) -> list[dic
 
 
 def _refuse_duplicates(drill: Drill, idx: int, cat: Catalogue, target: Target) -> None:
-    """Refuse a near-copy of a staged sibling or of another exam's drill."""
+    """Refuse a near-copy of a staged sibling or of another exam's drill.
+
+    Siblings are always held to `THRESHOLD`: one exam never asks the same
+    thing twice. Other exams' drills are held to it on a broad exam and to
+    `CORE_THRESHOLD` on a core one, where a new scenario on a known mechanic
+    is what the run asked for.
+    """
     for other_idx, other_id, value, reason in _sibling_scores(drill, idx):
         if similarity.is_duplicate(value):
             raise ValueError(
@@ -895,13 +1000,19 @@ def _refuse_duplicates(drill: Drill, idx: int, cat: Catalogue, target: Target) -
                 f"{similarity.THRESHOLD} ({reason}); redesign around a different "
                 "mechanic"
             )
+    limit = similarity.CORE_THRESHOLD if target.topics == "core" else similarity.THRESHOLD
     ranked = similarity.nearest(drill, _others(cat, target), n=1)
-    if ranked and similarity.is_duplicate(ranked[0][1]):
+    if ranked and similarity.is_duplicate(ranked[0][1], limit):
         other_id, value, reason = ranked[0]
         raise ValueError(
             f"drill {drill.id!r} is the same question as catalogue drill "
-            f"{other_id!r}: similarity {value:.2f} ≥ {similarity.THRESHOLD} "
-            f"({reason}); redesign around a different mechanic"
+            f"{other_id!r}: similarity {value:.2f} ≥ {limit} "
+            f"({reason}); "
+            + (
+                "this is a copy: change the scenario and what must be got right"
+                if target.topics == "core"
+                else "redesign around a different mechanic"
+            )
         )
 
 
@@ -1063,6 +1174,34 @@ def _stage_drill(drill_yaml: str, question_index: int) -> str:
         raise ValueError(
             f"the task text of {drill.id!r} is frozen since first staging; change "
             "solution, checks or setup, or stage a new drill id"
+        )
+    # The level's size, measured on the hand-written exams of that level. A
+    # task already staged is frozen, so only a new task is held to it.
+    ref = reference(cat, target)
+    words = len(drill.task.split())
+    if ref is not None and (baseline is None or replaced) and words > ref.task_words:
+        raise ValueError(
+            f"the task is {words} words; a {target.difficulty} question takes at "
+            f"most {ref.task_words} (three quarters of the tasks in "
+            f"{', '.join(ref.exams)} are that short). Ask the candidate for less "
+            "— fewer objects, fewer fields — and drop the checks that go with "
+            "it; do not just compress the wording"
+        )
+    # An image the candidate must type and the task never names cannot be
+    # known: the question is unsolvable as written. Same exemption as above,
+    # a frozen task cannot be mended.
+    unnamed = [i for i in drill.typed_images() if i not in drill.task]
+    if unnamed and (baseline is None or replaced):
+        raise ValueError(
+            f"the solution uses {', '.join(f'`{i}`' for i in unnamed)}, which the "
+            "task never names: a candidate cannot know it. State every image in "
+            "the task, in backticks"
+        )
+    if slot.clean and (drill.setup or drill.files):
+        raise ValueError(
+            f"question {idx} is planned `clean`: it starts from an empty "
+            "namespace, so the drill carries no `setup` and no `files`. Design a "
+            "task the candidate builds from nothing"
         )
     _refuse_duplicates(drill, idx, cat, target)
     namespace = slot.namespace or "default"
@@ -1357,6 +1496,36 @@ def record_rulings(rulings: dict[str, str]) -> str:
     )
 
 
+def _size(drill: Drill) -> tuple[int, int]:
+    """How much a question asks for: the values it is graded on, then the
+    length of its task."""
+    return sum(len(c.assert_) for c in drill.checks), len(drill.task.split())
+
+
+def weigh_by_size() -> dict[int, int]:
+    """Hand each domain's weights out again by size: the question that asks
+    for most is worth most. Returns {question: weight} for what changed.
+
+    The plan fixes which weights a domain has, long before a question exists;
+    which question gets which is only fair to decide once they are written.
+    The weights of a domain are the same afterwards, so its share and the
+    exam's 100 points stand. Slots without a domain (resumed and never planned
+    again) keep theirs.
+    """
+    by_domain: dict[str, list[int]] = {}
+    for idx in sorted(_staged):
+        if _plan[idx].domain:
+            by_domain.setdefault(_plan[idx].domain, []).append(idx)
+    changed: dict[int, int] = {}
+    for numbers in by_domain.values():
+        weights = sorted((_plan[i].weight for i in numbers), reverse=True)
+        ranked = sorted(numbers, key=lambda i: (_size(_staged[i]), -i), reverse=True)
+        for idx, weight in zip(ranked, weights, strict=True):
+            if _plan[idx].weight != weight:
+                _plan[idx].weight = changed[idx] = weight
+    return changed
+
+
 @tool(parse_docstring=True)
 @guard
 def finalize_exam(confirmed_questions: list[int], summary: str) -> str:
@@ -1385,6 +1554,9 @@ def finalize_exam(confirmed_questions: list[int], summary: str) -> str:
             "record_rulings with the critic's rulings first (a filed question is "
             "one the record says was proven AND confirmed)"
         )
+    # Before anything is dropped: a question that leaves takes the weight its
+    # size earned, not the one its slot was planned with.
+    reweighed = weigh_by_size()
     dropped = sorted(set(_staged) - keep)
     for idx in dropped:
         del _staged[idx]
@@ -1402,6 +1574,8 @@ def finalize_exam(confirmed_questions: list[int], summary: str) -> str:
             "exam": target.exam,
             "filed": sorted(keep),
             "dropped": dropped,
+            "weights": {str(i): _plan[i].weight for i in sorted(keep)},
+            "reweighed": sorted(i for i in reweighed if i in keep),
             "files": [str(p.relative_to(target.kubiq)) for p in written],
             "suggested_branch": pr.branch_name(target.exam),
             "suggested_commit": pr.commit_message(target.exam, len(keep)),

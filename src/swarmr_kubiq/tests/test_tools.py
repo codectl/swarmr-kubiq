@@ -131,7 +131,6 @@ def _slots() -> list[dict[str, Any]]:
                     "topic": "q",
                 }
             )
-    slots[0]["feature_version"] = "1.36"
     return slots
 
 
@@ -360,9 +359,14 @@ def test_plan_refuses_wrong_wording_numbers_and_namespaces(checkout: Path) -> No
     slots[1]["topic"] = "two words"
     assert "`topic` must be one lowercase word" in _error(tools.plan_exam, slots=slots)
 
+    # A word another exam used at that number is not refused: the tool takes
+    # the next free namespace, and the same one when the plan is sent again.
     slots = _slots()
     slots[0]["topic"] = "pod"  # composes ckad01-pod, ckad-mock-1's
-    assert "belongs to another exam" in _error(tools.plan_exam, slots=slots)
+    for _ in range(2):
+        plan = _call(tools.plan_exam, slots=slots)
+        assert plan["slots"][0]["namespace"] == "ckad01-pod2"
+    tools.reset_staging()
 
     slots = _slots()
     slots[2]["question"] = 2
@@ -687,7 +691,10 @@ def test_a_rerun_resumes_what_an_earlier_run_staged(planned: Path) -> None:
     _call(
         tools.stage_drill,
         drill_yaml=_drill(
-            id="resumed-pod", title="Resumed", task="Create `a`.", name="a"
+            id="resumed-pod",
+            title="Resumed",
+            task="Create `a` from `nginx:alpine`.",
+            name="a",
         ).replace("order: 701", "order: 702"),
         question_index=2,
     )
@@ -700,7 +707,10 @@ def test_a_rerun_resumes_what_an_earlier_run_staged(planned: Path) -> None:
     ]
     assert resumed[0]["problem"] == ""
     assert tools._plan[2].namespace == "ckad02-q" and tools._plan[2].domain == ""
-    assert tools._task_at_staging[2] == ("resumed-pod", "Create `a`.\n")
+    assert tools._task_at_staging[2] == (
+        "resumed-pod",
+        "Create `a` from `nginx:alpine`.\n",
+    )
     assert "frozen since first staging" in _error(
         tools.stage_drill,
         drill_yaml=_drill(
@@ -950,3 +960,145 @@ def test_parallel_authors_stage_without_corrupting_each_other(planned: Path) -> 
     assert sorted(tools._staged) == [1, 2, 3, 4]
     exam = (planned / "exams" / "ckad-mock-7.yaml").read_text()
     assert all(f"drill: {tools._staged[i].id}" in exam for i in (1, 2, 3, 4))
+
+
+# -- difficulty and topics -------------------------------------------------------
+
+
+def test_an_easy_exam_cuts_each_share_into_more_small_questions() -> None:
+    assert tools.allocate_weights(20, 4, small=True) == [8, 8, 2, 2]
+    assert tools.allocate_weights(20, 5, small=True) == [8, 8, 2, 1, 1]
+    # One way to carry the share: the preference changes nothing.
+    assert tools.allocate_weights(15, 4, small=True) == [8, 4, 2, 1]
+
+
+def test_a_core_exam_takes_no_feature_slot_and_files_its_difficulty(
+    checkout: Path,
+) -> None:
+    activate(
+        {
+            "kubiq": str(checkout),
+            "exam": "ckad-mock-7",
+            "questions": str(QUESTIONS),
+            "difficulty": "easy",
+            "topics": "core",
+        }
+    )
+    tools.reset_staging()
+    featured = _slots()
+    featured[0]["feature_version"] = "1.36"
+    assert "core-topics exam takes none" in _error(tools.plan_exam, slots=featured)
+    slots = _slots()
+    plan = _call(tools.plan_exam, slots=slots)
+    assert plan["weight_total"] == 100
+    _call(tools.stage_drill, drill_yaml=_drill(), question_index=1)
+    assert (
+        load_exam(checkout / "exams/ckad-mock-7.yaml", partial=True).difficulty == "easy"
+    )
+
+
+def test_plan_reports_every_problem_in_one_refusal(checkout: Path) -> None:
+    """The commander resends the whole plan per call: one refusal names it all."""
+    slots = _slots()
+    slots[0]["topic"] = "two words"
+    slots[1]["competency"] = "Build container images"
+    # Observability and Maintenance drops to 3 slots: 15 points need 4.
+    slots[6]["domain"] = "Application Deployment"
+    slots[6]["competency"] = CURRICULUM["CKAD"]["Application Deployment"][1][0]
+    err = _error(tools.plan_exam, slots=slots)
+    assert "3 problems in this plan" in err
+    assert "question 1: `topic` must be one lowercase word" in err
+    assert "competency 'Build container images' is not verbatim" in err
+    assert "15 points cannot be split into 3 weights" in err
+    assert (
+        tools.fewest_domain_slots(current())["Application Observability and Maintenance"]
+        == 4
+    )
+
+
+def test_a_level_is_held_to_the_hand_written_exams_of_that_level(checkout: Path) -> None:
+    """Two hand-written medium questions, neither with a setup, tasks of 6 and
+    10 words: a medium exam takes tasks up to 9 words and every slot clean."""
+    ref = checkout / "drills" / "ckad-mock-2"
+    ref.mkdir()
+    (ref / "q01.yaml").write_text(
+        _secret(id="ref-secret", name="r1", task="Store a token in Secret `{name}`.")
+    )
+    (ref / "q02.yaml").write_text(
+        _configmap(
+            id="ref-cm",
+            name="r2",
+            task="Create a ConfigMap `r2` with key `mode` set to `fast`.",
+        )
+    )
+    (checkout / "exams" / "ckad-mock-2.yaml").write_text(
+        "id: ckad-mock-2\ntitle: CKAD Mock Exam 2\ndifficulty: medium\nquestions:\n"
+        "  - { drill: ref-secret, namespace: ckad01-a, weight: 50 }\n"
+        "  - { drill: ref-cm, namespace: ckad02-b, weight: 50 }\n"
+    )
+    params = {"kubiq": str(checkout), "exam": "ckad-mock-7", "questions": str(QUESTIONS)}
+    activate({**params, "difficulty": "medium"})
+    tools.reset_staging()
+    err = _error(tools.plan_exam, slots=_slots())
+    assert f"0 slots are `clean`; this medium exam needs at least {QUESTIONS}" in err
+    slots = [{**s, "clean": True} for s in _slots()]
+    _call(tools.plan_exam, slots=slots)
+
+    long_task = "Create a Pod `web` running `nginx:alpine` in this very namespace now."
+    err = _error(tools.stage_drill, drill_yaml=_drill(task=long_task), question_index=1)
+    assert "the task is 11 words; a medium question takes at most 9" in err
+    prepared = (
+        _drill()
+        + "setup: |\n  apiVersion: v1\n  kind: ConfigMap\n  metadata:\n    name: x\n"
+    )
+    err = _error(tools.stage_drill, drill_yaml=prepared, question_index=1)
+    assert "question 1 is planned `clean`" in err
+    _call(tools.stage_drill, drill_yaml=_drill(), question_index=1)
+
+    # Another level has no hand-written exam here: nothing to be held to.
+    activate({**params, "difficulty": "easy"})
+    tools.reset_staging()
+    _call(tools.plan_exam, slots=_slots())
+    _call(tools.stage_drill, drill_yaml=_drill(task=long_task), question_index=1)
+
+
+def test_an_image_the_candidate_must_type_is_named_in_the_task(planned: Path) -> None:
+    vague = _drill(task="Create a Pod `web` that serves a web page.")
+    err = _error(tools.stage_drill, drill_yaml=vague, question_index=1)
+    assert "the solution uses `nginx:alpine`, which the task never names" in err
+    # An image the setup already carries is not the candidate's to know.
+    prepared = vague + (
+        "setup: |\n  apiVersion: v1\n  kind: Pod\n  metadata:\n    name: old\n"
+        "  spec:\n    containers:\n      - name: web\n        image: nginx:alpine\n"
+    )
+    _call(tools.stage_drill, drill_yaml=prepared, question_index=1)
+
+
+def test_the_filed_weights_follow_the_size_of_the_questions(
+    planned: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Questions 1-3 share a domain planned 8, 8, 4: the one graded on the
+    fewest values ends with the 4, wherever it was planned."""
+    _fake_proofs(monkeypatch, {})
+    small = _configmap()
+    big = _drill().replace(
+        '      - { path: "spec.containers[0].image", contains: nginx }\n',
+        '      - { path: "spec.containers[0].image", contains: nginx }\n'
+        '      - { path: "spec.containers[0].name", equals: web }\n',
+    )
+    other = _drill(id="pod-two", name="two", task="Run `nginx:alpine` as Pod `two`.")
+    other = other.replace("spec.containers[0].image", "spec.containers[0].name")
+    other = other.replace("contains: nginx", "equals: web")
+    other += '      - { path: "metadata.name", equals: two }\n'
+    for number, drill in enumerate((small, big, other), start=1):
+        _call(tools.stage_drill, drill_yaml=drill, question_index=number)
+    assert [tools._plan[i].weight for i in (1, 2, 3)] == [8, 8, 4]
+    _call(tools.prove_all)
+    _call(
+        tools.record_rulings,
+        rulings={"1": "confirmed", "2": "confirmed", "3": "confirmed"},
+    )
+    done = _call(tools.finalize_exam, confirmed_questions=[1, 2, 3], summary="s")
+    assert done["weights"] == {"1": 4, "2": 8, "3": 8} and done["reweighed"] == [1, 3]
+    exam = load_exam(planned / "exams/ckad-mock-7.yaml", partial=True)
+    assert [q.weight for q in exam.questions] == [4, 8, 8]

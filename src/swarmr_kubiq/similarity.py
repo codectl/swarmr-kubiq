@@ -18,11 +18,24 @@ from dataclasses import dataclass, field
 from swarmr_kubiq.catalogue import Catalogue
 from swarmr_kubiq.drill import Drill
 
-__all__ = ["THRESHOLD", "Fingerprint", "fingerprint", "is_duplicate", "nearest", "score"]
+__all__ = [
+    "CORE_THRESHOLD",
+    "THRESHOLD",
+    "Fingerprint",
+    "fingerprint",
+    "is_duplicate",
+    "nearest",
+    "score",
+]
 
 # Above this two drills are the same question. Chosen so renamed copies of the
 # same mechanic land above it and different mechanics in one domain stay below.
 THRESHOLD = 0.62
+# The bar against other exams' drills on a core-topics exam, where a new
+# scenario on a mechanic the catalogue already has is wanted and only a
+# near-copy is not. Just above 0.83, the closest pair of hand-written drills
+# the catalogue keeps as two questions.
+CORE_THRESHOLD = 0.85
 
 _WEIGHTS = {"paths": 0.45, "mechanic": 0.35, "tokens": 0.20}
 
@@ -154,8 +167,8 @@ def score(a: Drill, b: Drill) -> float:
     return round(got / total, 4)
 
 
-def is_duplicate(value: float) -> bool:
-    return value >= THRESHOLD
+def is_duplicate(value: float, threshold: float = THRESHOLD) -> bool:
+    return value >= threshold
 
 
 def _reason(a: Fingerprint, b: Fingerprint) -> str:

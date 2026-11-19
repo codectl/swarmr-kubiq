@@ -80,3 +80,42 @@ def test_facts_list_every_drill_and_the_target(tmp_path: Path) -> None:
     assert "Services and Networking: 20%" in facts
     assert "broken.yaml" in facts
     assert banner(cat, t).startswith(f"{tmp_path.name}: 2 drills in 1 exams")
+
+
+def test_a_certification_without_exams_of_a_level_borrows_it(tmp_path: Path) -> None:
+    """The level is the measure, not the subject: CKA has no hand-written
+    medium exam here, so it is held to CKAD's; its own takes over once it exists."""
+    from swarmr_kubiq.catalogue import Catalogue, reference
+    from swarmr_kubiq.drill import Check, Drill, Exam, Question
+    from swarmr_kubiq.target import Target
+
+    def drill(name: str, cert: str, words: int) -> Drill:
+        check = Check(name="c", assert_=[{"path": "a", "exists": True}], resource={})
+        return Drill(name, 1, cert, name, "Pods", "w " * words, "kubectl x", [check])
+
+    def exam(name: str, cert: str, ids: list[str]) -> Exam:
+        asked = [Question(i, 50) for i in ids]
+        return Exam(name, name, cert, "", 120, 75, asked, difficulty="medium")
+
+    cat = Catalogue(
+        drills=[drill("a", "CKAD", 10), drill("b", "CKAD", 20)],
+        exams=[exam("ckad-mock-1", "CKAD", ["a", "b"])],
+    )
+    cka = Target(tmp_path, "cka-mock-9", "CKA", "http://x", 21)
+    borrowed = reference(cat, cka)
+    assert borrowed is not None and borrowed.exams == ("ckad-mock-1",)
+    assert (
+        reference(
+            cat, Target(tmp_path, "cka-mock-9", "CKA", "http://x", 21, None, "hard")
+        )
+        is None
+    )
+
+    cat.drills += [drill("c", "CKA", 40), drill("d", "CKA", 60)]
+    cat.exams.append(exam("cka-mock-1", "CKA", ["c", "d"]))
+    own = reference(cat, cka)
+    assert own is not None and own.exams == ("cka-mock-1",)
+    assert own.task_words > borrowed.task_words
+    # A generated exam of the level is never the yardstick.
+    cat.exams[-1].generated_by = "swarmr-kubiq"
+    assert reference(cat, cka) == borrowed
