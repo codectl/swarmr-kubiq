@@ -69,11 +69,32 @@ PARAMS = (
         "over its questions, so the exam still sums to 100.",
         required=False,
     ),
+    Param(
+        "difficulty",
+        "How demanding the questions are: easy, medium or hard. Default medium. "
+        "Easy is one resource from a clean namespace with more small questions; "
+        "medium changes existing objects in several steps; hard is multi-part "
+        "tasks and diagnoses on a prepared, often broken state. Written to the "
+        "exam file as `difficulty`.",
+        required=False,
+    ),
+    Param(
+        "topics",
+        "Which corners of the curriculum the questions may use: core or broad. "
+        "Default core: the everyday mechanics the real exam repeats — no "
+        "recent-feature questions, and a new scenario on a mechanic another exam "
+        "already has is accepted (only a near-copy is refused). Broad requires "
+        "recent Kubernetes features and refuses a question close to an existing "
+        "drill.",
+        required=False,
+    ),
 )
 
 _EXAM_ID = re.compile(r"^[a-z][a-z0-9-]{2,40}$")
 _VERSION = re.compile(r"^v?(\d+)\.(\d+)")
 _CERTS = {"CKAD": 21, "CKA": 21, "CKS": 19}
+_DIFFICULTIES = ("easy", "medium", "hard")
+_TOPICS = ("core", "broad")
 
 
 class TargetError(TeamError):
@@ -88,6 +109,8 @@ class Target:
     server: str
     questions: int
     version: str | None = None
+    difficulty: str = "medium"
+    topics: str = "core"
 
     @property
     def exam_file(self) -> Path:
@@ -164,6 +187,14 @@ def activate(params: dict[str, str] | None) -> Target:
         if not m:
             raise TargetError(f"version={raw_v!r} is not a Kubernetes version like 1.37.")
         version = f"{m.group(1)}.{m.group(2)}"
+    difficulty = (given.get("difficulty") or "medium").strip().lower()
+    if difficulty not in _DIFFICULTIES:
+        raise TargetError(
+            f"difficulty={difficulty!r} is not one of {', '.join(_DIFFICULTIES)}."
+        )
+    topics = (given.get("topics") or "core").strip().lower()
+    if topics not in _TOPICS:
+        raise TargetError(f"topics={topics!r} is not one of {', '.join(_TOPICS)}.")
     target = Target(
         kubiq=kubiq,
         exam=exam,
@@ -171,6 +202,8 @@ def activate(params: dict[str, str] | None) -> Target:
         server=server,
         questions=questions,
         version=version,
+        difficulty=difficulty,
+        topics=topics,
     )
     _current.set(target)
     return target

@@ -22,8 +22,8 @@ from deepagents import (
     create_deep_agent,
 )
 from langchain.agents.middleware.types import AgentMiddleware
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from swarmr.core.attribution import Attribution
 from swarmr.core.middleware import AnnounceName, FirstRoundBriefing
 from swarmr.core.model import build_model
@@ -32,12 +32,13 @@ from swarmr.core.team import RunContext, TeamBuild
 from swarmr_kubiq import prompts
 from swarmr_kubiq.catalogue import banner, profile_catalogue, render_facts
 from swarmr_kubiq.docs import whats_new
-from swarmr_kubiq.target import activate, minor
+from swarmr_kubiq.target import Target, activate, minor
 from swarmr_kubiq.tools import (
     AUTHOR_TOOLS,
     COMMANDER_TOOLS,
     CRITIC_TOOLS,
     check_server,
+    fewest_domain_slots,
     reset_staging,
     resume_staging,
 )
@@ -120,7 +121,7 @@ class TurnBudget(AgentMiddleware):
 
 
 def _subagents(
-    model: ChatOpenAI, facts: dict[str, str], attribution: Attribution
+    model: BaseChatModel, facts: dict[str, str], attribution: Attribution, target: Target
 ) -> list[SubAgent]:
     """The three specialists.
 
@@ -141,7 +142,9 @@ def _subagents(
                 "checks or setup, never the task, and it proves its own fix with "
                 "prove_questions, returning PROVEN or FAILED with the grader lines."
             ),
-            "system_prompt": prompts.author(facts["author"]),
+            "system_prompt": prompts.author(
+                facts["author"], target.difficulty, target.topics
+            ),
             "middleware": [
                 _read_only_fs(),
                 AnnounceName("author", attribution),
@@ -205,9 +208,16 @@ def build(run: RunContext) -> TeamBuild:
     version = target.version or ".".join(
         map(str, minor(catalogue.cluster_version) if catalogue.cluster_version else ())
     )
-    features = whats_new(version) if version else []
+    # A core-topics exam has no recent-feature slot, so the list is not paid for.
+    features = whats_new(version) if version and target.topics == "broad" else []
     facts = {
-        "author": render_facts(catalogue, target, resumed=resumed, features=features),
+        "author": render_facts(
+            catalogue,
+            target,
+            resumed=resumed,
+            features=features,
+            fewest_slots=fewest_domain_slots(target),
+        ),
         "critic": render_facts(catalogue, target, drills=False),
     }
 
@@ -218,8 +228,8 @@ def build(run: RunContext) -> TeamBuild:
         # run with a deterministic result — no model needs to sit between
         # "prove" and "verdict", and one fewer dispatch per question.
         tools=COMMANDER_TOOLS,
-        system_prompt=prompts.commander(facts["author"]),
-        subagents=_subagents(model, facts, run.attribution),
+        system_prompt=prompts.commander(facts["author"], target.topics),
+        subagents=_subagents(model, facts, run.attribution, target),
         # Planning belongs in write_todos, which the harness already provides.
         permissions=_NO_WRITES,
         # No specialist is briefed with the caller's request: the author needs

@@ -53,6 +53,8 @@ class TestVocabulary:
             "server",
             "version",
             "questions",
+            "difficulty",
+            "topics",
         ]
         assert [p.name for p in TEAM.params if p.required] == ["exam"]
 
