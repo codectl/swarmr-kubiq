@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/codectl/swarmr-kubiq/compare/v0.6.1...v0.7.0) (2026-11-19)
+
+
+### Features
+
+* refactor default difficulty generated exams ([#31](https://github.com/codectl/swarmr-kubiq/issues/31)) ([901142a](https://github.com/codectl/swarmr-kubiq/commit/901142a5ba23f07a63f667f8d321d2b3906c0ad2))
+
 ## [0.6.1](https://github.com/codectl/swarmr-kubiq/compare/v0.6.0...v0.6.1) (2026-11-12)
 
 
